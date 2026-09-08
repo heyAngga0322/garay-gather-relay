@@ -126,6 +126,9 @@ pub const INDEX_HTML: &str = r#"
             <button id="toggleCam" class="media-control" type="button" title="Toggle camera" aria-pressed="true">
                 <span class="control-icon" aria-hidden="true">📹</span><span class="control-label">Camera on</span>
             </button>
+            <button id="toggleScreen" class="media-control" type="button" title="Share screen" aria-pressed="false">
+                <span class="control-icon" aria-hidden="true">🖥</span><span class="control-label">Share screen</span>
+            </button>
         </div>
 
         <div id="status">Connecting to signaling server...</div>
@@ -144,7 +147,8 @@ pub const INDEX_HTML: &str = r#"
         const ws = new WebSocket(`ws://${location.host}/ws?room=${room}`);
         let peerConnection;
         let localStream;
-        let remotePeerId = null;
+        let cameraTrack;
+        let screenStream;
 
         function appendLog(message) {
             const time = new Date().toLocaleTimeString();
@@ -165,6 +169,13 @@ pub const INDEX_HTML: &str = r#"
         function updateMediaControls() {
             updateMediaControl('toggleMic', localStream?.getAudioTracks()[0], 'Mic', '🎙', '🔇');
             updateMediaControl('toggleCam', localStream?.getVideoTracks()[0], 'Camera', '📹', '🚫');
+            const screenButton = document.getElementById('toggleScreen');
+            const sharing = Boolean(screenStream);
+            screenButton.classList.toggle('off', sharing);
+            screenButton.setAttribute('aria-pressed', String(sharing));
+            screenButton.title = sharing ? 'Stop sharing screen' : 'Share screen';
+            screenButton.querySelector('.control-icon').textContent = sharing ? '⏹' : '🖥';
+            screenButton.querySelector('.control-label').textContent = sharing ? 'Stop sharing' : 'Share screen';
         }
 
         async function initMedia() {
@@ -172,6 +183,7 @@ pub const INDEX_HTML: &str = r#"
                 video: true,
                 audio: true,
             });
+            cameraTrack = localStream.getVideoTracks()[0];
             localVideo.srcObject = localStream;
             updateMediaControls();
         }
@@ -196,7 +208,7 @@ pub const INDEX_HTML: &str = r#"
                     type: 'candidate',
                     room,
                     from: peerId,
-                    to: remotePeerId,
+                    to: '',
                     candidate: {
                         candidate: event.candidate.candidate,
                         sdpMid: event.candidate.sdpMid,
@@ -222,19 +234,49 @@ pub const INDEX_HTML: &str = r#"
                 type: 'offer',
                 room,
                 from: peerId,
-                to: remotePeerId,
+                to: '',
                 sdp: offer.sdp,
             }));
             appendLog('Offer sent.');
         }
 
+        async function replaceVideoTrack(track) {
+            const sender = peerConnection?.getSenders().find((item) => item.track?.kind === 'video');
+            if (!sender) return;
+            await sender.replaceTrack(track);
+            localStream.removeTrack(localStream.getVideoTracks()[0]);
+            localStream.addTrack(track);
+            localVideo.srcObject = localStream;
+            await createOffer();
+        }
+
+        async function stopScreenSharing() {
+            if (!screenStream) return;
+            const previousScreenStream = screenStream;
+            screenStream = null;
+            previousScreenStream.getTracks().forEach((track) => track.stop());
+            await replaceVideoTrack(cameraTrack);
+            updateMediaControls();
+            appendLog('Screen sharing stopped.');
+        }
+
+        async function startScreenSharing() {
+            if (!peerConnection) {
+                configurePeerConnection();
+            }
+            screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+            const screenTrack = screenStream.getVideoTracks()[0];
+            screenTrack.addEventListener('ended', () => {
+                stopScreenSharing().catch((error) => appendLog(error.message));
+            }, { once: true });
+            await replaceVideoTrack(screenTrack);
+            updateMediaControls();
+            appendLog('Screen sharing started.');
+        }
+
         async function handleSignal(message) {
             const data = JSON.parse(message.data);
             if (!data || !data.type) return;
-
-            if (data.from && data.from !== peerId) {
-                remotePeerId = data.from;
-            }
 
             if (data.to && data.to !== peerId) {
                 return;
@@ -243,16 +285,7 @@ pub const INDEX_HTML: &str = r#"
             appendLog(`Received signal: ${data.type}`);
 
             if (data.type === 'peer-joined') {
-                if (data.peer_id && data.peer_id !== peerId) {
-                    remotePeerId = data.peer_id;
-                    status.textContent = 'Peer connected. Starting negotiation.';
-                    if (peerId < remotePeerId) {
-                        if (!peerConnection) {
-                            configurePeerConnection();
-                        }
-                        createOffer().catch((err) => appendLog(err.message));
-                    }
-                }
+                status.textContent = 'Peer connected through the media server.';
                 return;
             }
 
@@ -260,6 +293,9 @@ pub const INDEX_HTML: &str = r#"
                 peerId = data.peer_id;
                 status.textContent = `Connected as ${peerId}.`;
                 appendLog(`Assigned peer ID ${peerId}.`);
+                if (localStream) {
+                    createOffer().catch((err) => appendLog(err.message));
+                }
                 return;
             }
 
@@ -343,6 +379,19 @@ pub const INDEX_HTML: &str = r#"
             const track = localStream?.getVideoTracks()[0];
             if (track) {
                 track.enabled = !track.enabled;
+                updateMediaControls();
+            }
+        });
+
+        document.getElementById('toggleScreen').addEventListener('click', async () => {
+            try {
+                if (screenStream) {
+                    await stopScreenSharing();
+                } else {
+                    await startScreenSharing();
+                }
+            } catch (error) {
+                appendLog(error.message);
                 updateMediaControls();
             }
         });

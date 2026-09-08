@@ -1,19 +1,21 @@
 # WebRTC Axum Signaling Demo
 
-A modular Rust WebRTC signaling server built with Axum, Tokio, and the `webrtc` crate. The application serves a browser-based camera and microphone demo, manages room membership over WebSockets, and forwards targeted SDP and ICE signaling messages between peers.
+A modular Rust WebRTC media relay built with Axum, Tokio, and the `webrtc` crate. The application serves a browser-based camera, microphone, and screen-sharing demo, manages room membership over WebSockets, and forwards encoded RTP through server-side peer connections.
 
-The browser establishes the media connection directly with another browser using the native `RTCPeerConnection` API. The Rust server handles signaling and maintains a server-side `webrtc` peer connection for each room/peer lifecycle.
+Each browser establishes a WebRTC connection with the Rust server. The server copies incoming RTP packets from each participant to the other participants in the room.
 
 ## Features
 
 - Axum HTTP server with WebSocket support
 - Room-scoped peer management
 - Server-assigned peer identities
-- Targeted `offer`, `answer`, and ICE candidate forwarding
+- Server-side `offer`, `answer`, and ICE candidate handling
+- RTP media forwarding through the Rust backend
 - Browser camera and microphone access
 - Local and remote video elements
 - Microphone overlay toggle with on/off icons
 - Camera toggle with on/off state
+- Screen sharing with automatic camera restoration
 - `/health` endpoint
 - Server-side peer connection storage keyed by `room_id:peer_id`
 
@@ -80,11 +82,13 @@ Browser A                  Rust Axum Server                  Browser B
     |                              |<------ WebSocket connect ----|
     |<------ peer-joined ----------|------ peer-joined ---------->|
     |                              |                              |
-    |---------- offer ------------>|---------- offer ------------>|
-    |<---------- answer -----------|<---------- answer ------------|
-    |------- ICE candidate -------->|------ ICE candidate -------->|
-    |                              |                              |
-    |<========== direct WebRTC media connection ==================>|
+    |---------- offer ------------>|                              |
+    |<---------- answer -----------|                              |
+    |------- ICE candidate -------->|                              |
+    |<========== WebRTC media =====|                              |
+    |                              |========== WebRTC media =====>|
+    |                              |<========== WebRTC media =====|
+    |<========== WebRTC media =====|                              |
 ```
 
 ### Rust modules
@@ -119,17 +123,16 @@ Supported message types include:
 - `answer`: carries an SDP answer.
 - `candidate`: carries an ICE candidate.
 
-The server overwrites incoming `room`, `peer_id`, and `from` values with the values associated with the WebSocket connection. The `to` field is used to forward SDP and ICE messages only to the intended peer.
+The server overwrites incoming `room`, `peer_id`, and `from` values with the values associated with the WebSocket connection. Browser SDP and ICE messages terminate at the server. Server-generated SDP and ICE messages are sent back to the browser that owns the corresponding server-side peer connection.
 
 ## Browser Call Flow
 
 1. The browser connects to `/ws?room=demo-room`.
 2. The server sends a `welcome` message with a server-generated peer ID.
-3. Both peers receive a `peer-joined` notification.
-4. The peer with the lexicographically smaller ID creates the offer.
-5. The other peer applies the offer and returns an answer.
-6. Both peers exchange ICE candidates.
-7. Local audio/video tracks are sent through the browser-to-browser WebRTC connection.
+3. The browser creates an offer for its server-side peer connection.
+4. The server returns an answer and receives the browser's RTP tracks.
+5. The server creates relay tracks on the other participants' peer connections.
+6. The server renegotiates those connections and forwards encoded audio/video RTP.
 
 The microphone icon is displayed over the top-right of the local video. The camera control is displayed next to `Start Call`. Both controls update their icon, visual state, tooltip, and accessibility state when toggled.
 
@@ -139,8 +142,8 @@ The microphone icon is displayed over the top-right of the local video. The came
 - The server always binds to port `3000`.
 - There is no authentication or authorization.
 - There is no room capacity limit or persistent room storage.
-- Browser media does not pass through the Rust server.
-- The server-side `webrtc` peer connection is currently used for signaling-side SDP/ICE processing and lifecycle management, not media forwarding.
+- The relay currently keeps one server-side peer connection per browser and forwards encoded RTP without decoding it.
+- Track cleanup and renegotiation are optimized for the demo's small rooms; a production SFU would need stronger lifecycle and backpressure handling.
 - The demo uses Google's public STUN server. TURN configuration may be needed on restrictive networks.
 - End-to-end calls require two browser clients and appropriate camera/microphone permissions.
 

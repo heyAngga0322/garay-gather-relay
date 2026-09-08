@@ -90,6 +90,7 @@ async fn handle_socket(socket: WebSocket, room_id: String, state: AppState) {
 
     let (mut sender, mut receiver) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    state.webrtc.register_peer(&room_id, &peer_id, tx.clone()).await;
 
     let existing_peers;
     {
@@ -171,35 +172,20 @@ async fn handle_socket(socket: WebSocket, room_id: String, state: AppState) {
             signal.peer_id = peer_id.clone();
             signal.from = peer_id.clone();
 
-            if let Err(error) = state
+            match state
                 .webrtc
                 .process_signal(&signal, &room_id, &peer_id)
                 .await
             {
-                eprintln!("webrtc error for peer {} in room {}: {}", peer_id, room_id, error);
-            }
-
-            let payload = match serde_json::to_string(&signal) {
-                Ok(value) => value,
-                Err(_) => continue,
-            };
-
-            let peers = {
-                let rooms = state.rooms.lock().await;
-                rooms.get(&room_id).cloned().unwrap_or_default()
-            };
-
-            let target_peer = signal.to.clone();
-            for peer in peers {
-                if peer.id == peer_id {
-                    continue;
+                Ok(Some(response)) => {
+                    if let Ok(payload) = serde_json::to_string(&response) {
+                        let _ = tx.send(payload);
+                    }
                 }
-
-                if !target_peer.is_empty() && peer.id != target_peer {
-                    continue;
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("webrtc error for peer {} in room {}: {}", peer_id, room_id, error);
                 }
-
-                let _ = peer.tx.send(payload.clone());
             }
         }
     }
