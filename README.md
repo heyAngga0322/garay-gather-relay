@@ -11,6 +11,7 @@ Each browser establishes a WebRTC connection with the Rust server. The server co
 - Server-assigned peer identities
 - Server-side `offer`, `answer`, and ICE candidate handling
 - RTP media forwarding through the Rust backend
+- Vue 3 browser UI loaded from the unpkg CDN
 - Browser camera and microphone access
 - Local and remote video elements
 - Microphone overlay toggle with on/off icons
@@ -26,6 +27,7 @@ Each browser establishes a WebRTC connection with the Rust server. The server co
   - `navigator.mediaDevices.getUserMedia`
   - `RTCPeerConnection`
   - WebSocket
+- Internet access to load Vue 3 from the unpkg CDN
 - Camera and microphone permissions
 
 ## Run
@@ -96,7 +98,7 @@ Browser A                  Rust Axum Server                  Browser B
 - `src/main.rs`: Tokio application entrypoint.
 - `src/app.rs`: Axum routes, shared state, room membership, WebSocket handling, forwarding, and cleanup.
 - `src/signaling.rs`: Serde models for signaling messages and ICE candidates.
-- `src/ui.rs`: Embedded HTML, CSS, and browser-side WebRTC logic.
+- `src/ui.rs`: Embedded HTML, CSS, Vue 3 UI, and browser-side WebRTC logic.
 - `src/webrtc.rs`: Server-side `webrtc` crate peer connection management.
 
 ## Signaling Messages
