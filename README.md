@@ -42,6 +42,10 @@ The server listens on:
 http://127.0.0.1:3000
 ```
 
+The room peer limit defaults to 2. Set `MAX_PEERS_PER_ROOM` to configure the
+admission limit; keep it at 2 until multi-participant media negotiation has
+been validated and capacity has been measured on the deployment hardware.
+
 Open the application in two browser tabs. Grant camera and microphone permissions in both tabs, then use the `Start Call` button if negotiation does not start automatically.
 
 The default room is `demo-room`. The WebSocket endpoint also accepts an explicit room:
@@ -49,6 +53,18 @@ The default room is `demo-room`. The WebSocket endpoint also accepts an explicit
 ```text
 ws://127.0.0.1:3000/ws?room=my-room
 ```
+
+## Room and WebSocket Limits
+
+The server enforces a narrow room ID format and room membership cap:
+
+- Room IDs must be 1-64 characters long.
+- Allowed characters are ASCII letters, numbers, `-`, and `_`.
+- Whitespace and separators like `/` are rejected.
+- Each room can admit at most 2 peers at a time.
+- WebSocket text messages larger than 64 KiB are rejected before signal parsing.
+
+These limits are checked before the connection is upgraded and before signaling is processed, so invalid rooms and oversized payloads are rejected cleanly.
 
 ## Verify the Server
 
@@ -148,6 +164,10 @@ The microphone icon is displayed over the top-right of the local video. The came
 - Track cleanup and renegotiation are optimized for the demo's small rooms; a production SFU would need stronger lifecycle and backpressure handling.
 - The demo uses Google's public STUN server. TURN configuration may be needed on restrictive networks.
 - End-to-end calls require two browser clients and appropriate camera/microphone permissions.
+
+## Acknowledgements
+
+This project builds on the work of the WebRTC.rs team and the Vue.js team. Their open-source contributions and tooling made the signaling and browser UI layers practical and approachable.
 
 ## License
 

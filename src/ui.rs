@@ -76,7 +76,18 @@ pub const INDEX_HTML: &str = r###"
                     <span class="control-label">Mic {{ micEnabled ? "on" : "off" }}</span>
                 </button>
             </div>
-            <div><video ref="remoteVideo" autoplay playsinline></video></div>
+            <div
+                class="video-panel"
+                v-for="(remote, index) in remoteStreams"
+                :key="remote.id"
+            >
+                <video
+                    autoplay
+                    playsinline
+                    :ref="(element) => setRemoteVideo(element, remote.stream)"
+                ></video>
+                <span class="participant-label">Participant {{ index + 1 }}</span>
+            </div>
         </div>
 
         <div style="margin-top: 1rem;">
@@ -117,7 +128,7 @@ pub const INDEX_HTML: &str = r###"
             setup() {
                 const room = 'demo-room';
                 const localVideo = ref(null);
-                const remoteVideo = ref(null);
+                const remoteStreams = ref([]);
                 const logArea = ref(null);
                 const status = ref('Connecting to signaling server...');
                 const logs = ref('');
@@ -148,6 +159,10 @@ pub const INDEX_HTML: &str = r###"
                     sharingScreen.value = Boolean(screenStream);
                 }
 
+                function setRemoteVideo(element, stream) {
+                    if (element && element.srcObject !== stream) element.srcObject = stream;
+                }
+
                 async function initMedia() {
                     localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
                     cameraTrack = localStream.getVideoTracks()[0];
@@ -161,8 +176,15 @@ pub const INDEX_HTML: &str = r###"
                     });
                     localStream.getTracks().forEach((track) => peerConnection.addTrack(track, localStream));
                     peerConnection.ontrack = (event) => {
-                        remoteVideo.value.srcObject = event.streams[0];
-                        appendLog('Remote video stream received.');
+                        const stream = event.streams[0] ?? new MediaStream([event.track]);
+                        const streamPrefix = `relay-${room}-`;
+                        const participantId = stream.id.startsWith(streamPrefix)
+                            ? stream.id.slice(streamPrefix.length)
+                            : stream.id;
+                        if (!remoteStreams.value.some((remote) => remote.id === stream.id)) {
+                            remoteStreams.value.push({ id: stream.id, peerId: participantId, stream });
+                        }
+                        appendLog('Remote participant media received.');
                     };
                     peerConnection.onicecandidate = (event) => {
                         if (!event.candidate) return;
@@ -224,11 +246,24 @@ pub const INDEX_HTML: &str = r###"
 
                 async function handleSignal(event) {
                     const data = JSON.parse(event.data);
-                    if (!data || !data.type || (data.to && data.to !== peerId)) return;
+                    if (!data || !data.type) return;
+                    if (data.type !== 'welcome' && data.to && data.to !== peerId) return;
                     appendLog(`Received signal: ${data.type}`);
 
                     if (data.type === 'peer-joined') {
                         status.value = 'Peer connected through the media server.';
+                        return;
+                    }
+                    if (data.type === 'peer-left') {
+                        remoteStreams.value = remoteStreams.value.filter(
+                            (remote) => remote.peerId !== data.peer_id,
+                        );
+                        appendLog(`Participant ${data.peer_id} left.`);
+                        return;
+                    }
+                    if (data.type === 'relay-error') {
+                        status.value = `Media relay error: ${data.sdp}`;
+                        appendLog(`Media relay error: ${data.sdp}`);
                         return;
                     }
                     if (data.type === 'welcome') {
@@ -328,9 +363,9 @@ pub const INDEX_HTML: &str = r###"
                 });
 
                 return {
-                    cameraEnabled, logs, localVideo, logArea, micEnabled, remoteVideo,
+                    cameraEnabled, logs, localVideo, logArea, micEnabled, remoteStreams,
                     sharingScreen, startCall, status, toggleCamera, toggleMicrophone,
-                    toggleScreenSharing,
+                    toggleScreenSharing, setRemoteVideo,
                 };
             },
         }).mount('#app');
