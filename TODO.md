@@ -8,7 +8,7 @@ Goal: evolve the demo into a reliable, secure meeting app for small groups. Trea
 
 - [ ] Measure server resources and choose a supported production room capacity; keep the default at 2 until then.
 - [ ] Complete and load-test SFU track publication, subscription, renegotiation, and cleanup for multiple participants.
-- [ ] Verify late-join track replay and multi-participant RTP delivery with a three-peer negotiation test.
+- [x] Verify late-join track replay and multi-participant RTP delivery with a three-peer negotiation test.
 - [ ] Show a participant roster with join/leave and microphone/camera state.
 - [ ] Render all remote participants and the local preview in responsive grid and active-speaker layouts.
 - [ ] Allow participants to pin a video and switch layouts without disrupting media.
@@ -24,8 +24,8 @@ Goal: evolve the demo into a reliable, secure meeting app for small groups. Trea
 - [x] Broadcast `peer-left` and verify the notification with a WebSocket integration test.
 - [x] Accept the targeted `welcome` signal before the client knows its assigned peer ID; confirm the browser sends an offer and receives an answer.
 - [x] Serialize ICE candidate metadata as browser-standard `sdpMid` and `sdpMLineIndex`; add a serialization regression test.
-- [ ] Retain published tracks for late subscribers and render one remote tile per stream; implementation is present, but three-peer RTP behavior is not yet verified.
-- [ ] Queue server renegotiation changes and roll back colliding offers; collision rollback and queued-offer behavior were verified November 4, while multi-peer RTP delivery remains unverified.
+- [x] Retain published tracks for late subscribers and render one remote tile per stream; three-peer RTP replay is verified by the November 5 loopback test.
+- [x] Queue server renegotiation changes and roll back colliding offers; collision rollback and queued-offer behavior were verified November 4, and multi-peer RTP delivery was verified November 5.
 
 ### P1: Core In-Call Collaboration
 
@@ -53,7 +53,7 @@ Goal: evolve the demo into a reliable, secure meeting app for small groups. Trea
 - [ ] Add deployment, TLS/TURN, secrets, scaling, backup, incident response, and rollback runbooks.
 - [ ] Provide privacy information and a user-facing way to report meeting abuse or technical issues.
 
-## Planned Four-Day Scope (November 3-6, 2026)
+## Four-Day Scope: November 3-6, 2026 (Completed)
 
 Scope: constrain room IDs, enforce a per-room peer limit, limit WebSocket message size, and add focused tests and documentation. Authentication, origin validation, rate limiting, and outbound-channel backpressure are out of scope for this schedule. Keep the checklist below unchecked until each item is implemented and verified.
 
@@ -75,11 +75,21 @@ Scope: constrain room IDs, enforce a per-room peer limit, limit WebSocket messag
 - [x] Verify oversized messages are rejected and normal signaling messages still work.
 - [x] Add WebSocket-level coverage for the size limit and room constraints.
 
-### Friday, November 6: Integration and Closeout
+### Friday, November 6: Integration and Closeout (Completed)
 
 - [x] Finish focused unit and WebSocket integration tests for all three limits.
 - [x] Document the room ID rules, peer limit, message-size limit, and rejection behavior.
 - [x] Run `cargo fmt --check`, `cargo check`, and `cargo test`; resolve issues within this scope.
+
+#### Friday, November 6, 2026: Resource Baseline and Capacity Decision
+
+Goal: measure the current relay workload before selecting a supported production room capacity. Keep the default room limit at 2 unless repeatable measurements justify a change.
+
+- [ ] Define a repeatable loopback workload with fixed participant counts, synthetic RTP packet rate, payload size, and run duration.
+- [ ] Measure 2- and 3-participant runs repeatedly; record host details, CPU time, peak memory, and sent/received packet counts.
+- [ ] Verify each run delivers media as expected and leaves no connections, publications, relay tracks, or forwarding tasks behind.
+- [ ] Record the measurements, test limitations, and a provisional room-capacity recommendation in `PROGRESS.md`.
+- [ ] Run `cargo fmt --check`, `cargo check`, and `cargo test` after the benchmark changes.
 
 ### November 4: P0 Relay Stabilization
 
@@ -89,25 +99,38 @@ Focus: fix the signaling and relay path so one room can safely handle offer/answ
 - [x] Verify per-peer SDP serialization and queued renegotiation under concurrent audio/video track changes.
 - [x] Test queued-offer handling after an outstanding server offer is answered.
 - [x] Test SDP rollback when a browser offer collides with a server offer.
-- [ ] Verify tracks published before a new participant joins are delivered to that participant.
-- [ ] Remove relay tracks from active peer connections when a publisher leaves.
-- [ ] Track and cancel RTP forwarding tasks during disconnects.
+- [x] Verify tracks published before a new participant joins are delivered to that participant.
+- [x] Remove relay tracks from active peer connections when a publisher leaves.
+- [x] Track and cancel RTP forwarding tasks during disconnects.
 - [x] Signal relay setup and RTP-write failures to affected peers and show them in the browser UI.
 - [x] Reject source codec mappings absent from the destination offer.
 - [x] Re-run focused relay tests, `cargo fmt --check`, `cargo check`, and `cargo test`.
 
-Note: late-join replay, RTP forwarding, and publisher teardown still need a multi-peer ICE/RTP integration test before those checklist items can be closed.
+Late-join replay, RTP forwarding, and publisher teardown were verified by the November 5 three-peer loopback integration test.
+
+### November 5: Three-Peer RTP Verification
+
+Goal: prove the relay carries media across a three-peer room and cleans up subscriber tracks and forwarding tasks when a publisher disconnects. Use local peer connections and loopback ICE so the test does not depend on cameras, external STUN, or browser automation.
+
+- [x] Build a reusable local-peer test harness that exchanges ICE candidates and observes remote tracks.
+- [x] Publish a track from peer A, then join peer C; verify the server replays A's existing publication into C's initial negotiation.
+- [x] Send representative RTP from A and verify both peer B and late-joining peer C receive packets.
+- [x] Disconnect publisher A; verify its relay senders are removed from active subscribers and renegotiation is triggered or queued.
+- [x] Verify RTP forwarding tasks for A stop and publication/relay state is removed after teardown.
+- [x] Run the focused three-peer test repeatedly, then run `cargo fmt --check`, `cargo check`, and `cargo test`.
+
+Exit criteria: all media and cleanup assertions pass in the loopback integration test. If real RTP cannot be made deterministic with the current `webrtc` test APIs, record the blocker and keep these items unchecked rather than substituting SDP-only coverage.
 
 ## P0: Make the Relay Correct
 
-- [ ] Serialize SDP renegotiation per peer connection.
-- [ ] Add offer queues and signaling-state handling for concurrent track changes.
-- [ ] Handle SDP rollback when offer collisions occur.
-- [ ] Add tracks published before a new participant joins to that participant.
-- [ ] Remove relay tracks from active peer connections when a publisher leaves.
-- [ ] Track and cancel RTP forwarding tasks during disconnects.
-- [ ] Handle relay failures and notify affected peers.
-- [ ] Verify that source codecs are supported by each destination peer.
+- [x] Serialize SDP renegotiation per peer connection.
+- [x] Add offer queues and signaling-state handling for concurrent track changes.
+- [x] Handle SDP rollback when offer collisions occur.
+- [x] Add tracks published before a new participant joins to that participant.
+- [x] Remove relay tracks from active peer connections when a publisher leaves.
+- [x] Track and cancel RTP forwarding tasks during disconnects.
+- [x] Handle relay failures and notify affected peers.
+- [x] Verify that source codecs are supported by each destination peer.
 
 ## P1: Improve Media Quality
 
@@ -121,9 +144,9 @@ Note: late-join replay, RTP forwarding, and publisher teardown still need a mult
 
 - [ ] Add authentication and room authorization.
 - [ ] Validate WebSocket origins.
-- [ ] Validate and constrain room IDs.
-- [ ] Add room capacity limits.
-- [ ] Add WebSocket message-size limits.
+- [x] Validate and constrain room IDs.
+- [x] Add room capacity limits.
+- [x] Add WebSocket message-size limits.
 - [ ] Add connection, signaling, and screen-share rate limits.
 - [ ] Prevent unbounded outbound channel memory growth.
 - [ ] Add abuse protection for repeated connections and malformed signaling.
@@ -152,19 +175,19 @@ Note: late-join replay, RTP forwarding, and publisher teardown still need a mult
 - [ ] Make the room ID configurable instead of hardcoding `demo-room`.
 - [ ] Add WebSocket reconnect and peer-connection recovery.
 - [ ] Handle camera-only, microphone-only, and permission-denied states separately.
-- [ ] Display clear connection, relay, and media errors.
-- [ ] Support multiple remote participants instead of one remote video element.
+- [x] Display clear connection, relay, and media errors.
+- [x] Support multiple remote participants instead of one remote video element.
 - [ ] Improve screen-share state recovery after browser capture ends.
 - [ ] Add responsive controls and production-quality accessibility review.
 
 ## P2: Testing
 
-- [ ] Add unit tests for signaling normalization and validation.
-- [ ] Add integration tests for server-side offer/answer negotiation.
+- [x] Add unit tests for signaling parsing, candidate serialization, and room ID validation.
+- [x] Add integration tests for server-side offer/answer negotiation.
 - [ ] Add RTP relay tests for audio and video tracks.
 - [ ] Add screen-share renegotiation tests.
 - [ ] Add disconnect, reconnect, and cleanup tests.
-- [ ] Add multi-participant room tests.
+- [x] Add multi-participant room tests.
 - [ ] Add browser automation tests for camera, microphone, and screen sharing.
 - [ ] Add packet-loss and network-failure tests.
 - [ ] Add load tests for room and peer limits.
