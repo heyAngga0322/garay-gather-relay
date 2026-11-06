@@ -13,3 +13,6 @@ rtc = "0.20.5"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
 tokio-tungstenite = "0.27"
 webrtc = "0.20.5"
+
+[dev-dependencies]
+libc = "0.2"

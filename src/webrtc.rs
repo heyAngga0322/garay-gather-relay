@@ -704,7 +704,13 @@ mod tests {
             },
         },
     };
-    use std::sync::Arc;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+        time::Instant,
+    };
     use tokio::{
         sync::mpsc,
         task::JoinHandle,
@@ -983,6 +989,223 @@ mod tests {
             sequence_number = sequence_number.wrapping_add(1);
             sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    const BASELINE_PACKET_RATE: u64 = 50;
+    const BASELINE_PAYLOAD_SIZE: usize = 1200;
+    const BASELINE_DURATION: Duration = Duration::from_secs(10);
+
+    #[derive(Clone, Copy)]
+    struct ProcessUsage {
+        user_microseconds: i64,
+        system_microseconds: i64,
+        peak_rss_kilobytes: i64,
+    }
+
+    fn process_usage() -> ProcessUsage {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+        let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        assert_eq!(result, 0, "getrusage failed");
+        let usage = unsafe { usage.assume_init() };
+        ProcessUsage {
+            user_microseconds: usage.ru_utime.tv_sec * 1_000_000 + usage.ru_utime.tv_usec,
+            system_microseconds: usage.ru_stime.tv_sec * 1_000_000 + usage.ru_stime.tv_usec,
+            peak_rss_kilobytes: usage.ru_maxrss,
+        }
+    }
+
+    fn print_host_facts() {
+        let cpu = std::fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|contents| {
+                contents.lines().find_map(|line| {
+                    line.strip_prefix("model name\t: ")
+                        .or_else(|| line.strip_prefix("Hardware\t: "))
+                        .map(str::to_owned)
+                })
+            })
+            .unwrap_or_else(|| "unknown".to_owned());
+        let memory_kilobytes = std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|contents| {
+                contents.lines().find_map(|line| {
+                    line.strip_prefix("MemTotal:")
+                        .and_then(|value| value.split_whitespace().next())
+                        .and_then(|value| value.parse::<u64>().ok())
+                })
+            })
+            .unwrap_or_default();
+        let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .unwrap_or_else(|_| "unknown\n".to_owned());
+        eprintln!(
+            "baseline_host arch={} kernel={} cpu={cpu} memory_total_kb={memory_kilobytes}",
+            std::env::consts::ARCH,
+            kernel.trim()
+        );
+    }
+
+    async fn send_baseline_rtp(
+        track: Arc<TrackLocalStaticRTP>,
+        duration: Duration,
+        packet_rate: u64,
+        payload_size: usize,
+        sent_packets: Arc<AtomicU64>,
+    ) {
+        let mut ticker = tokio::time::interval(Duration::from_secs_f64(1.0 / packet_rate as f64));
+        let deadline = Instant::now() + duration;
+        let mut sequence_number = 1u16;
+        loop {
+            ticker.tick().await;
+            if Instant::now() >= deadline {
+                break;
+            }
+            let mut packet = Packet::default();
+            packet.header.version = 2;
+            packet.header.payload_type = 96;
+            packet.header.ssrc = 1234;
+            packet.header.sequence_number = sequence_number;
+            packet.header.timestamp = u32::from(sequence_number) * 1_800;
+            packet.payload = vec![0xaa; payload_size].into();
+            if track.write_rtp(packet).await.is_err() {
+                break;
+            }
+            sent_packets.fetch_add(1, Ordering::Relaxed);
+            sequence_number = sequence_number.wrapping_add(1);
+        }
+    }
+
+    async fn run_resource_baseline(participant_count: usize) {
+        assert!(participant_count == 2 || participant_count == 3);
+        print_host_facts();
+        let usage_before = process_usage();
+        let started = Instant::now();
+        let agent = WebRtcAgent::with_udp_addrs(vec!["127.0.0.1:0".to_owned()]);
+        let room = format!("resource-baseline-{participant_count}");
+        let source_track = create_video_track();
+        let mut peers =
+            vec![connect_test_peer(&agent, &room, "a", Some(source_track.clone()), false).await];
+        let mut peer_b = connect_test_peer(&agent, &room, "b", None, true).await;
+        timeout(Duration::from_secs(10), peers[0].connected_rx.recv())
+            .await
+            .expect("publisher did not establish loopback ICE")
+            .expect("publisher ICE state stream closed");
+        timeout(Duration::from_secs(10), peer_b.connected_rx.recv())
+            .await
+            .expect("subscriber B did not establish loopback ICE")
+            .expect("subscriber B ICE state stream closed");
+        let warmup_sender = tokio::spawn(send_test_rtp(source_track.clone()));
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if agent
+                    .published_tracks
+                    .lock()
+                    .await
+                    .values()
+                    .any(|publication| publication.source_peer_key == format!("{room}:a"))
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("publisher track was not published to the server");
+        warmup_sender.abort();
+        answer_server_offer(&agent, &room, &mut peer_b).await;
+        while peer_b.packet_rx.try_recv().is_ok() {}
+        peers.push(peer_b);
+
+        if participant_count == 3 {
+            let mut peer_c = connect_test_peer(&agent, &room, "c", None, true).await;
+            timeout(Duration::from_secs(10), peer_c.connected_rx.recv())
+                .await
+                .expect("subscriber C did not establish loopback ICE")
+                .expect("subscriber C ICE state stream closed");
+            peers.push(peer_c);
+        }
+
+        let sent_packets = Arc::new(AtomicU64::new(0));
+        let sender = tokio::spawn(send_baseline_rtp(
+            source_track,
+            BASELINE_DURATION,
+            BASELINE_PACKET_RATE,
+            BASELINE_PAYLOAD_SIZE,
+            sent_packets.clone(),
+        ));
+        timeout(BASELINE_DURATION + Duration::from_secs(2), async {
+            while sent_packets.load(Ordering::Relaxed) < BASELINE_PACKET_RATE * 9 {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("synthetic sender did not produce the expected workload");
+        sender.await.expect("synthetic sender task panicked");
+
+        let sent_count = sent_packets.load(Ordering::Relaxed);
+        let minimum_received = sent_count * 90 / 100;
+        let mut received_counts = Vec::new();
+        for peer in peers.iter_mut().skip(1) {
+            let mut received = 0u64;
+            while let Ok(packet) = peer.packet_rx.try_recv() {
+                assert_eq!(packet.payload.len(), BASELINE_PAYLOAD_SIZE);
+                received += 1;
+            }
+            assert!(
+                received >= minimum_received,
+                "subscriber {} received {received}/{sent_count} RTP packets",
+                peer.id
+            );
+            received_counts.push((peer.id.clone(), received));
+        }
+
+        for peer in &peers {
+            for task in &peer.forwarding_tasks {
+                task.abort();
+            }
+            let _ = peer.connection.close().await;
+            agent.remove_peer(&room, &peer.id).await;
+        }
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let relay_tasks_empty = agent.relay_tasks.lock().await.is_empty();
+                let publications_empty = agent.published_tracks.lock().await.is_empty();
+                if relay_tasks_empty && publications_empty {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("relay tasks or publications remained after teardown");
+        assert!(agent.connections.lock().await.is_empty());
+        assert!(agent.senders.lock().await.is_empty());
+        assert!(agent.relay_tasks.lock().await.is_empty());
+        assert!(agent.published_tracks.lock().await.is_empty());
+        assert!(agent.relays.lock().await.is_empty());
+
+        let elapsed = started.elapsed();
+        let usage_after = process_usage();
+        eprintln!(
+            "baseline_result participants={participant_count} packet_rate={BASELINE_PACKET_RATE}/s payload_bytes={BASELINE_PAYLOAD_SIZE} duration_s={} sent_packets={sent_count} received_packets={received_counts:?} elapsed_s={:.3} cpu_user_s={:.3} cpu_system_s={:.3} peak_rss_mib={:.2}",
+            BASELINE_DURATION.as_secs(),
+            elapsed.as_secs_f64(),
+            (usage_after.user_microseconds - usage_before.user_microseconds) as f64 / 1_000_000.0,
+            (usage_after.system_microseconds - usage_before.system_microseconds) as f64
+                / 1_000_000.0,
+            usage_after.peak_rss_kilobytes as f64 / 1024.0
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "resource baseline; run with --ignored --exact webrtc::tests::resource_baseline_two_peers --nocapture"]
+    async fn resource_baseline_two_peers() {
+        run_resource_baseline(2).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "resource baseline; run with --ignored --exact webrtc::tests::resource_baseline_three_peers --nocapture"]
+    async fn resource_baseline_three_peers() {
+        run_resource_baseline(3).await;
     }
 
     async fn create_browser_peer() -> Arc<dyn PeerConnection> {

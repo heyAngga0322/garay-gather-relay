@@ -4,6 +4,71 @@
 
 Goal: evolve the demo into a reliable, secure meeting app for small groups. Treat the items below as product requirements; keep them unchecked until implemented and verified. Multi-participant media is a prerequisite for the meeting features built on top of it.
 
+## Implementation Sprint: November 9-13, 2026
+
+### Sprint Goal
+
+Deliver a usable guest-based online-meeting MVP as a complete vertical slice: a host creates a meeting, guests join through an invite, the server enforces meeting permissions, participants see and control one another's live media, and the call recovers from common device or network interruptions. Implement and verify working behavior each day; do not mark roadmap items complete based only on design, stubs, or standalone experiments.
+
+This sprint does not claim full production readiness. Use HMAC-SHA-256 signed, expiring meeting tickets with cryptographically random nonces and server-side single-use consumption, plus in-memory meeting state for the MVP; do not introduce a custom account system or pretend guest tickets are user accounts. Keep the default room capacity at 2 unless representative load results justify a change. Scheduling, persistent meeting history, recording, captions, and public deployment remain outside this sprint and stay unchecked.
+
+### Monday, November 9: Meeting Creation and Guest Join
+
+- [ ] Replace the fixed `demo-room` UI path with a create/join screen accepting a validated display name and either a room code or invite URL.
+- [ ] Add server endpoints to create a meeting and request admission. Generate unpredictable room IDs and ticket material with a cryptographically secure random source; do not derive identity or credentials from timestamps.
+- [ ] Return a host credential only to the creator and a distinct, short-lived, single-use guest join ticket after guest admission. Bind each ticket to one room, one role, an expiry, and a nonce; atomically consume its nonce at WebSocket admission. Keep invite URLs limited to the room identifier; exchange the ticket for the WebSocket connection and never log credentials.
+- [ ] Store meeting owner, members, room lock/lobby settings, and ticket consumption state in shared `AppState`; delete empty meeting state after the final disconnect.
+- [ ] Keep the existing room-ID validation and capacity enforcement on every admission path, and return actionable HTTP errors for invalid, expired, full, locked, or unknown meetings.
+- [ ] Add route and service tests for create/join, invalid IDs/names, ticket expiry/reuse, capacity rejection, concurrent admission, and state cleanup. Add UI checks for direct invite-link entry and refresh behavior.
+- [ ] Exit criteria: host can create a room and copy an invite; a second browser can join by that invite; a third connection is rejected at the current default capacity; invalid or reused tickets cannot open a WebSocket.
+
+### Tuesday, November 10: Authorization, Lobby, and Participant State
+
+- [ ] Authenticate WebSocket upgrades with the one-use join ticket, bind the resulting server-side identity and role to the socket, and ignore client-supplied identity or role fields for all routing and permissions. A lobby guest must remain pending and receive no WebRTC peer connection, media, or room-control permission until a host admits that socket; admission promotes it into the active roster, and denial closes it with a user-readable reason.
+- [ ] Enforce configured WebSocket origin allowlists and reject missing/invalid origins in browser-facing production configuration. Fail startup if required signing or origin configuration is absent in production mode.
+- [ ] Implement server-authoritative host and guest roles, meeting lock, waiting-room admission/denial, participant removal, and host mute requests. Reject unauthorized actions without mutating state and notify the actor with a structured error.
+- [ ] Extend signaling with validated participant display name and microphone, camera, and screen-share state; broadcast updates only within the authorized room and send a current roster snapshot to each admitted participant.
+- [ ] Replace unbounded per-socket outbound queues with bounded queues and a defined slow-client policy; add connection and signaling rate limits and limits for names and state payloads.
+- [ ] Add WebSocket integration tests for origin rejection, ticket authentication, server-owned identity, host-only moderation, locked/lobby admission, roster snapshots and updates, rate limits, slow consumers, and disconnect cleanup.
+- [ ] Exit criteria: a guest cannot admit, remove, mute, lock, or impersonate participants; authorized host operations update every remaining roster consistently; denied requests leave room state unchanged.
+
+### Wednesday, November 11: Complete Participant and Video Experience
+
+- [ ] Replace the demo heading and log-first layout with the meeting room view: room title/invite action, participant roster, responsive local/remote media grid, connection state, and a compact accessible control bar.
+- [ ] Render and remove one stable media tile per remote participant/track, show display names and mic/camera/screen-share states, and preserve the local preview when remote tracks change.
+- [ ] Add grid and active-speaker layouts plus pin/unpin controls; layout changes must only change presentation and must not renegotiate or stop tracks.
+- [ ] Make mic, camera, leave, copy-invite, layout, and pin controls keyboard-operable with accessible names, pressed/selected states, visible focus, and screen-reader status announcements.
+- [ ] Handle permission denial and audio-only/video-only capture independently. Present a usable join state when either device is unavailable instead of blocking the entire meeting.
+- [ ] Add browser tests for two- and three-participant roster transitions, media tile add/remove, pin/layout changes, keyboard controls, and independent audio/video permission failures.
+- [ ] Exit criteria: each participant sees correct names and media states; join/leave updates remove stale tiles; changing layout or pin never interrupts active RTP.
+
+### Thursday, November 12: Screen Sharing, Device Changes, and Recovery
+
+- [ ] Complete screen sharing as a room-wide state transition: replace the outgoing video track, publish the sharer's identity/state, restore the selected camera track on browser capture end, and clean up renegotiation on stop, permission denial, or disconnect.
+- [ ] Add camera and microphone device selectors populated from `enumerateDevices`; apply device changes to active senders without losing the meeting, and handle device removal or permission revocation with a clear fallback state.
+- [ ] Implement bounded exponential WebSocket reconnect with visible reconnecting/failed states, rejoin using a fresh ticket, refresh roster state, and recreate/re-negotiate the peer connection without duplicating media tiles or forwarding tasks.
+- [ ] Recover from failed ICE/peer-connection state with a bounded ICE restart or controlled peer-connection rebuild; stop retrying and show a recoverable leave/rejoin action after the retry budget is exhausted.
+- [ ] Add tests for screen-share start/end and browser-ended capture, device replacement/removal, WebSocket interruption, ICE failure, successful recovery, exhausted retries, and cleanup after leave during recovery.
+- [ ] Exit criteria: screen capture ending returns to camera when available; device changes do not create duplicate tracks; temporary transport loss restores the call and roster, while permanent failure presents a clear action and leaves no server-side peer or relay state.
+
+### Friday, November 13: End-to-End Acceptance and MVP Closeout
+
+- [ ] Run the complete browser flow with automated Chromium peers using fake media devices: create room, join by invite, exchange audio/video, share/stop screen, exercise host admission/removal/mute, disconnect/reconnect, and leave/cleanup.
+- [ ] Add a four-participant relay acceptance workload in an optimized server build with every participant publishing audio and video; verify every expected subscriber receives media, negotiation and teardown complete, and no peer/publication/relay/task state remains after room shutdown.
+- [ ] Keep the default capacity at 2 unless the four-participant workload passes repeatedly with documented host/build conditions and measured CPU, memory, packet delivery, and cleanup. If it does not pass, fix the relay issue or keep capacity unchanged and document the blocker; do not infer capacity from the current single-publisher baseline.
+- [ ] Run `cargo fmt --check`, `cargo check`, `cargo test`, the browser end-to-end suite, and the optimized multi-participant acceptance workload. Fix regressions in this sprint's scope before calling the MVP complete.
+- [ ] Update `PROGRESS.md` with shipped behavior, exact commands/results, known limitations, any incomplete criteria, and the next release-blocking work. Update `CLAUDE.md` to reflect the actual media-routing and security architecture.
+- [ ] Exit criteria: a fresh checkout can be configured and run from documented steps; automated tests prove the full guest meeting workflow and cleanup; no production-readiness checklist item is marked complete without its own evidence.
+
+### Sprint-Wide Definition of Done
+
+- [ ] No credential or role is trusted from an unverified client field; room-scoped actions are authorized server-side.
+- [ ] Every new signaling message has Rust serialization/validation coverage and a browser integration test.
+- [ ] Media, roster state, and moderation state converge correctly after join, leave, denial, reconnect, and host action.
+- [ ] Bounded retries and queues prevent unbounded task, memory, or signaling growth; all exits clean up peer connections, relay tracks, and forwarding tasks.
+- [ ] Accessible controls and understandable permission, connection, and media failure states are covered by browser checks.
+- [ ] The sprint report distinguishes implemented guest-MVP behavior from account authentication, persistence, TLS/TURN deployment, scheduling, captions, recording, and any unverified room-capacity claims.
+
 ### P0: Multi-Participant Meeting Foundation
 
 - [ ] Measure server resources and choose a supported production room capacity; keep the default at 2 until then.
@@ -85,11 +150,11 @@ Scope: constrain room IDs, enforce a per-room peer limit, limit WebSocket messag
 
 Goal: measure the current relay workload before selecting a supported production room capacity. Keep the default room limit at 2 unless repeatable measurements justify a change.
 
-- [ ] Define a repeatable loopback workload with fixed participant counts, synthetic RTP packet rate, payload size, and run duration.
-- [ ] Measure 2- and 3-participant runs repeatedly; record host details, CPU time, peak memory, and sent/received packet counts.
-- [ ] Verify each run delivers media as expected and leaves no connections, publications, relay tracks, or forwarding tasks behind.
-- [ ] Record the measurements, test limitations, and a provisional room-capacity recommendation in `PROGRESS.md`.
-- [ ] Run `cargo fmt --check`, `cargo check`, and `cargo test` after the benchmark changes.
+- [x] Define a repeatable loopback workload with fixed participant counts, synthetic RTP packet rate, payload size, and run duration.
+- [x] Measure 2- and 3-participant runs repeatedly; record host details, CPU time, peak memory, and sent/received packet counts.
+- [x] Verify each run delivers media as expected and leaves no connections, publications, relay tracks, or forwarding tasks behind.
+- [x] Record the measurements, test limitations, and a provisional room-capacity recommendation in `PROGRESS.md`.
+- [x] Run `cargo fmt --check`, `cargo check`, and `cargo test` after the benchmark changes.
 
 ### November 4: P0 Relay Stabilization
 
