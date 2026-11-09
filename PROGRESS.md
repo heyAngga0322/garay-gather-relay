@@ -96,3 +96,54 @@ The Monday foundation is now in place. The remaining work is not a blank slate a
 ## Next Action
 
 Move to the Tuesday authorization and lobby work: server-authoritative roles, host admission, origin checks, and room-scoped moderation before the full meeting flow is considered complete.
+
+# Progress Report: November 10, 2026
+
+## Authorization and socket admission
+
+Completed the first pass of the Tuesday authorization work for the guest-meeting flow.
+
+- Added a server-side ticket resolver that binds the socket to the canonical host/guest role from the meeting record instead of trusting client-provided identity or role fields.
+- Enforced single-use guest ticket consumption, expiry checks, and lobby rejection when a meeting is in the waiting-room state.
+- Added a production-safe origin allowlist check for browser-facing WebSocket upgrades using `WEBRTC_ALLOWED_ORIGINS` / `ALLOWED_ORIGINS`, with startup failure in `APP_ENV=production` if the allowlist is missing.
+- Kept the existing room admission behavior intact while ensuring the socket admission path rejects unauthorized ticket or origin attempts before the connection is upgraded.
+
+## Validation
+
+The November 10 changes were verified with the project’s standard Rust checks:
+
+- `cargo fmt` passed.
+- `cargo check` passed.
+- `cargo test --quiet` passed: 16 passed, 0 failed, 2 ignored.
+
+## Remaining Tuesday work
+
+The core November 10 meeting-control loop is now in place. The remaining non-core follow-up is the queue/rate-limit hardening pass:
+
+- bounded queue / slow-client policy for per-socket outbound traffic
+- connection and signaling rate limits
+- payload-size bounds for participant names and state updates
+
+The auth, origin, lobby, roster, and host-control slices are implemented and validated; the remaining work is operational hardening rather than missing core meeting authorization behavior.
+
+# Progress Report: November 10 Hardening Pass
+
+## Bounded outbound traffic and payload safety
+
+Completed the Tuesday hardening pass for per-socket backpressure, signaling throttling, and payload validation.
+
+- Replaced the per-socket outbound fan-out path with a bounded `tokio::sync::mpsc::channel` so a slow client gets dropped without unbounded memory growth.
+- Retained the WebRTC agent's internal signaling channels as-is while forwarding server-generated WebRTC events through the bounded socket queue to preserve the room-flow semantics without a server-side queue blow-up.
+- Added display-name and signal-state validators that cap participant names and state payload bytes before the state is accepted.
+- Added a simple rate-limiter utility that tracks event bursts in a rolling window and rejects excess signaling spam.
+
+## Validation
+
+Verified with the project’s standard checks:
+
+- `cargo fmt && cargo check && cargo test --quiet` passed.
+- Test result: 18 passed, 0 failed, 2 ignored.
+
+## Status
+
+The November 10 operational hardening tasks are complete and recorded in the codebase. The remaining open work is the broader Wednesday/Thursday meeting UX and media-system milestones, not the socket safety layer or the authorization flow that was previously blocked.

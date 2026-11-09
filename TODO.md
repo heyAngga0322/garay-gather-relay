@@ -26,13 +26,13 @@ Current status: complete for the implemented MVP foundation. The project now use
 
 ### Tuesday, November 10: Authorization, Lobby, and Participant State
 
-- [ ] Authenticate WebSocket upgrades with the one-use join ticket, bind the resulting server-side identity and role to the socket, and ignore client-supplied identity or role fields for all routing and permissions. A lobby guest must remain pending and receive no WebRTC peer connection, media, or room-control permission until a host admits that socket; admission promotes it into the active roster, and denial closes it with a user-readable reason.
-- [ ] Enforce configured WebSocket origin allowlists and reject missing/invalid origins in browser-facing production configuration. Fail startup if required signing or origin configuration is absent in production mode.
-- [ ] Implement server-authoritative host and guest roles, meeting lock, waiting-room admission/denial, participant removal, and host mute requests. Reject unauthorized actions without mutating state and notify the actor with a structured error.
-- [ ] Extend signaling with validated participant display name and microphone, camera, and screen-share state; broadcast updates only within the authorized room and send a current roster snapshot to each admitted participant.
-- [ ] Replace unbounded per-socket outbound queues with bounded queues and a defined slow-client policy; add connection and signaling rate limits and limits for names and state payloads.
-- [ ] Add WebSocket integration tests for origin rejection, ticket authentication, server-owned identity, host-only moderation, locked/lobby admission, roster snapshots and updates, rate limits, slow consumers, and disconnect cleanup.
-- [ ] Exit criteria: a guest cannot admit, remove, mute, lock, or impersonate participants; authorized host operations update every remaining roster consistently; denied requests leave room state unchanged.
+- [x] Authenticate WebSocket upgrades with the one-use join ticket, bind the resulting server-side identity and role to the socket, and ignore client-supplied identity or role fields for all routing and permissions. A lobby guest must remain pending and receive no WebRTC peer connection, media, or room-control permission until a host admits that socket; admission promotes it into the active roster, and denial closes it with a user-readable reason.
+- [x] Enforce configured WebSocket origin allowlists and reject missing/invalid origins in browser-facing production configuration. Fail startup if required signing or origin configuration is absent in production mode.
+- [x] Implement server-authoritative host and guest roles, meeting lock, waiting-room admission/denial, participant removal, and host mute requests. Reject unauthorized actions without mutating state and notify the actor with a structured error.
+- [x] Extend signaling with validated participant display name and microphone, camera, and screen-share state; broadcast updates only within the authorized room and send a current roster snapshot to each admitted participant.
+- [x] Replace unbounded per-socket outbound queues with bounded queues and a defined slow-client policy; add connection and signaling rate limits and limits for names and state payloads.
+- [x] Add WebSocket integration tests for origin rejection, ticket authentication, server-owned identity, host-only moderation, locked/lobby admission, roster snapshots and updates, rate limits, slow consumers, and disconnect cleanup.
+- [x] Exit criteria: a guest cannot admit, remove, mute, lock, or impersonate participants; authorized host operations update every remaining roster consistently; denied requests leave room state unchanged.
 
 ### Wednesday, November 11: Complete Participant and Video Experience
 

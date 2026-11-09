@@ -26,7 +26,27 @@ pub fn validate_room_id(room_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ParticipantState {
+    #[serde(default)]
+    pub peer_id: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub camera_on: bool,
+    #[serde(default)]
+    pub screen_share: bool,
+    #[serde(default)]
+    pub admitted: bool,
+    #[serde(default)]
+    pub connected: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct SignalMessage {
     #[serde(rename = "type")]
     pub kind: String,
@@ -39,9 +59,21 @@ pub struct SignalMessage {
     #[serde(default)]
     pub to: String,
     #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub camera_on: bool,
+    #[serde(default)]
+    pub screen_share: bool,
+    #[serde(default)]
     pub sdp: String,
     #[serde(default)]
     pub candidate: Option<CandidateMessage>,
+    #[serde(default)]
+    pub participants: Vec<ParticipantState>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
