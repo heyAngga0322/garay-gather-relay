@@ -71,3 +71,28 @@ Keep `MAX_PEERS_PER_ROOM` at 2. Three peers delivered this specific single-publi
 - Increase participant and room counts progressively, include packet loss/jitter and disconnect/reconnect churn, and investigate bandwidth and CPU saturation points.
 - Verify repeated room teardown under load for task, socket, publication, and memory growth; add an explicit upper-bound assertion for cleanup time.
 - Use those results to define supported room capacity and operational CPU, memory, bandwidth, and media-quality headroom before changing the default limit.
+
+# Progress Report: November 9, 2026
+
+## Meeting Creation and Guest Join
+
+Implemented the first-pass guest-meeting flow for the Monday sprint. The project now has a room-creation API, guest ticket issuance, secure random room and ticket material, and a minimal create/join browser page that no longer relies on the fixed `demo-room` flow.
+
+- Added `POST /api/meeting` to create a meeting and return a room ID plus host ticket.
+- Added `POST /api/meeting/:room/ticket` to request a short-lived guest join ticket.
+- Added secure random room IDs and ticket nonces via `getrandom` in `src/app.rs`.
+- Enforced ticket validation during `WebSocket` admission when a `ticket` query parameter is supplied.
+- Replaced the embedded page in `src/ui.rs` with a create/join form that accepts a display name and either a room code or invite URL.
+
+## Status
+
+The Monday foundation is now in place. The remaining work is not a blank slate anymore; the next sprint step is to tighten authorization, waiting-room semantics, and room-scoped roles for Tuesday.
+
+## Validation
+
+- `cargo test --quiet` passed: 15 passed, 0 failed, 2 ignored.
+- The existing room-capacity, message-size, and WebSocket regression tests remain green after the meeting/ticket changes.
+
+## Next Action
+
+Move to the Tuesday authorization and lobby work: server-authoritative roles, host admission, origin checks, and room-scoped moderation before the full meeting flow is considered complete.

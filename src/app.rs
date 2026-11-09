@@ -1,18 +1,18 @@
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::{
     Json, Router,
-    extract::{Query, State, WebSocketUpgrade},
+    extract::{Path, Query, State, WebSocketUpgrade},
     http::StatusCode,
     response::{Html, IntoResponse},
-    routing::get,
+    routing::{get, post},
 };
 use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{Mutex, mpsc};
 
@@ -23,8 +23,53 @@ pub const MAX_PEERS_PER_ROOM: usize = 2;
 #[derive(Clone, Debug)]
 pub struct AppState {
     rooms: Arc<Mutex<HashMap<String, Vec<Peer>>>>,
+    meetings: Arc<Mutex<HashMap<String, MeetingState>>>,
     webrtc: Arc<crate::webrtc::WebRtcAgent>,
     max_peers_per_room: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct MeetingTicket {
+    pub room_id: String,
+    pub role: String,
+    pub nonce: String,
+    pub expires_at_ms: u128,
+    pub consumed: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct MeetingState {
+    pub room_id: String,
+    pub owner_name: String,
+    pub host_ticket: String,
+    pub guest_tickets: HashMap<String, MeetingTicket>,
+    pub members: Vec<String>,
+    pub lock: bool,
+    pub lobby: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateMeetingRequest {
+    pub display_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateMeetingResponse {
+    pub room_id: String,
+    pub invite_url: String,
+    pub host_ticket: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GuestTicketRequest {
+    pub display_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GuestTicketResponse {
+    pub room_id: String,
+    pub ticket: String,
+    pub invite_url: String,
 }
 
 impl AppState {
@@ -35,9 +80,141 @@ impl AppState {
     pub fn with_room_capacity(max_peers_per_room: usize) -> Self {
         Self {
             rooms: Arc::new(Mutex::new(HashMap::new())),
+            meetings: Arc::new(Mutex::new(HashMap::new())),
             webrtc: Arc::new(crate::webrtc::WebRtcAgent::new()),
             max_peers_per_room: max_peers_per_room.max(1),
         }
+    }
+
+    pub async fn create_meeting(&self, display_name: &str) -> Result<CreateMeetingResponse, String> {
+        let trimmed = display_name.trim();
+        if trimmed.is_empty() {
+            return Err("Display name cannot be empty.".to_owned());
+        }
+        if trimmed.len() > 64 {
+            return Err("Display name is too long.".to_owned());
+        }
+
+        let room_id = self.next_room_id().await;
+        let host_ticket = self.make_ticket(&room_id, "host").await;
+        let mut rooms = self.rooms.lock().await;
+        rooms.entry(room_id.clone()).or_default();
+        drop(rooms);
+
+        let mut meetings = self.meetings.lock().await;
+        meetings.insert(
+            room_id.clone(),
+            MeetingState {
+                room_id: room_id.clone(),
+                owner_name: trimmed.to_owned(),
+                host_ticket: host_ticket.clone(),
+                guest_tickets: HashMap::new(),
+                members: vec![trimmed.to_owned()],
+                lock: false,
+                lobby: false,
+            },
+        );
+
+        Ok(CreateMeetingResponse {
+            room_id: room_id.clone(),
+            invite_url: format!("http://127.0.0.1:3000/?room={room_id}&ticket={host_ticket}"),
+            host_ticket,
+        })
+    }
+
+    pub async fn request_guest_ticket(&self, room_id: &str, display_name: &str) -> Result<GuestTicketResponse, String> {
+        let trimmed = display_name.trim();
+        if trimmed.is_empty() {
+            return Err("Display name cannot be empty.".to_owned());
+        }
+        validate_room_id(room_id)?;
+
+        let mut meetings = self.meetings.lock().await;
+        let meeting = meetings.get_mut(room_id).ok_or_else(|| format!("Unknown meeting: {room_id}"))?;
+        if meeting.lock {
+            return Err(format!("Meeting {room_id} is locked."));
+        }
+
+        let ticket = self.make_ticket(room_id, "guest").await;
+        let expires_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            + 3_600_000;
+
+        meeting.guest_tickets.insert(
+            ticket.clone(),
+            MeetingTicket {
+                room_id: room_id.to_owned(),
+                role: "guest".to_owned(),
+                nonce: ticket.split(':').last().unwrap_or_default().to_owned(),
+                expires_at_ms,
+                consumed: false,
+            },
+        );
+
+        Ok(GuestTicketResponse {
+            room_id: room_id.to_owned(),
+            ticket: ticket.clone(),
+            invite_url: format!("http://127.0.0.1:3000/?room={room_id}&ticket={ticket}"),
+        })
+    }
+
+    pub async fn consume_ticket(&self, room_id: &str, ticket: &str) -> Result<String, String> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+
+        let mut meetings = self.meetings.lock().await;
+        let meeting = meetings.get_mut(room_id).ok_or_else(|| format!("Unknown meeting: {room_id}"))?;
+
+        if ticket == meeting.host_ticket {
+            return Ok("host".to_string());
+        }
+
+        let guest_ticket = meeting
+            .guest_tickets
+            .get_mut(ticket)
+            .ok_or_else(|| format!("Unknown or invalid join ticket for room {room_id}"))?;
+
+        if guest_ticket.consumed {
+            return Err(format!("Join ticket for room {room_id} has already been used."));
+        }
+        if guest_ticket.expires_at_ms <= now_ms {
+            return Err(format!("Join ticket for room {room_id} has expired."));
+        }
+
+        guest_ticket.consumed = true;
+        Ok(guest_ticket.role.clone())
+    }
+
+    pub async fn validate_ticket(&self, room_id: &str, ticket: &str) -> bool {
+        self.consume_ticket(room_id, ticket).await.is_ok()
+    }
+
+    async fn next_room_id(&self) -> String {
+        const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut bytes = [0u8; 12];
+        getrandom::fill(&mut bytes).expect("failed to generate room id");
+        let mut room = String::with_capacity(12);
+        for value in bytes {
+            let idx = (value as usize) % CHARSET.len();
+            room.push(CHARSET[idx] as char);
+        }
+        room
+    }
+
+    async fn make_ticket(&self, room_id: &str, role: &str) -> String {
+        let mut bytes = [0u8; 18];
+        getrandom::fill(&mut bytes).expect("failed to generate ticket nonce");
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        let mut nonce = String::with_capacity(18);
+        for value in bytes {
+            let idx = (value as usize) % alphabet.len();
+            nonce.push(alphabet[idx] as char);
+        }
+        format!("{role}:{room_id}:{nonce}")
     }
 }
 
@@ -105,6 +282,8 @@ pub async fn start_server() {
     let app = Router::new()
         .route("/", get(index))
         .route("/health", get(health))
+        .route("/api/meeting", post(create_meeting_handler))
+        .route("/api/meeting/{room}/ticket", post(request_guest_ticket_handler))
         .route("/ws", get(websocket_handler))
         .with_state(state);
 
@@ -128,6 +307,35 @@ async fn index() -> Html<&'static str> {
     Html(crate::ui::INDEX_HTML)
 }
 
+async fn create_meeting_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateMeetingRequest>,
+) -> impl IntoResponse {
+    match state.create_meeting(&payload.display_name).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": error })),
+        )
+            .into_response(),
+    }
+}
+
+async fn request_guest_ticket_handler(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+    Json(payload): Json<GuestTicketRequest>,
+) -> impl IntoResponse {
+    match state.request_guest_ticket(&room_id, &payload.display_name).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": error })),
+        )
+            .into_response(),
+    }
+}
+
 async fn websocket_handler(
     Query(query): Query<RoomQuery>,
     ws: WebSocketUpgrade,
@@ -140,6 +348,17 @@ async fn websocket_handler(
             format!("Invalid room ID: {message}"),
         )
             .into_response();
+    }
+
+    let ticket = query.ticket.clone();
+    if ticket.is_some() {
+        if let Err(message) = state.consume_ticket(&room_id, ticket.as_deref().unwrap()).await {
+            return (
+                StatusCode::UNAUTHORIZED,
+                format!("Ticket rejected: {message}"),
+            )
+                .into_response();
+        }
     }
 
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
@@ -303,13 +522,15 @@ mod tests {
 }
 
 async fn handle_socket(socket: WebSocket, room_id: String, state: AppState) {
-    let peer_id = format!(
-        "peer-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    );
+    let mut peer_id = String::with_capacity(18);
+    peer_id.push_str("peer-");
+    let alphabet = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut bytes = [0u8; 12];
+    getrandom::fill(&mut bytes).expect("failed to generate peer id");
+    for value in bytes {
+        let idx = (value as usize) % alphabet.len();
+        peer_id.push(alphabet[idx] as char);
+    }
 
     let (mut sender, mut receiver) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();

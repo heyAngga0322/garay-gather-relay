@@ -57,6 +57,8 @@ pub struct CandidateMessage {
 #[derive(Debug, Deserialize)]
 pub struct RoomQuery {
     pub room: Option<String>,
+    pub ticket: Option<String>,
+    pub display_name: Option<String>,
 }
 
 #[cfg(test)]

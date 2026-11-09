@@ -4,371 +4,218 @@ pub const INDEX_HTML: &str = r###"
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>WebRTC Signaling Demo</title>
+    <title>Guest Meeting Demo</title>
     <style>
+        :root {
+            color-scheme: dark;
+            --bg: #0f172a;
+            --panel: #111827;
+            --panel-2: #1f2937;
+            --accent: #38bdf8;
+            --text: #e5e7eb;
+            --muted: #94a3b8;
+            --danger: #f87171;
+        }
         body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
             font-family: Arial, sans-serif;
-            margin: 2rem;
-            background: #0f172a;
-            color: #e2e8f0;
         }
-        .container { max-width: 960px; margin: 0 auto; }
-        .grid {
+        .container {
+            max-width: 700px;
+            margin: 3rem auto;
+            padding: 2rem;
+            background: var(--panel);
+            border: 1px solid #334155;
+            border-radius: 16px;
+        }
+        h1 { margin-top: 0; }
+        .form-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
             gap: 1rem;
+            margin-top: 1.25rem;
         }
-        .video-panel { position: relative; }
-        video {
-            width: 100%; max-height: 320px; background: #020617;
-            border: 1px solid #334155; border-radius: 12px;
+        label {
+            display: grid;
+            gap: 0.35rem;
+            font-weight: 600;
+        }
+        input, button {
+            font: inherit;
+        }
+        input {
+            padding: 0.8rem 0.9rem;
+            border-radius: 10px;
+            border: 1px solid #475569;
+            background: var(--panel-2);
+            color: var(--text);
+        }
+        .row {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
         }
         button {
-            background: #38bdf8; border: none; border-radius: 8px;
-            color: #082f49; padding: 0.75rem 1rem; font-weight: 700;
-            cursor: pointer; margin-right: 0.5rem;
+            border: none;
+            border-radius: 10px;
+            background: var(--accent);
+            color: #082f49;
+            padding: 0.8rem 1.1rem;
+            font-weight: 700;
+            cursor: pointer;
         }
-        button.media-control { min-width: 8rem; }
-        button.icon-control {
-            position: absolute; top: 0.75rem; right: 0.75rem; z-index: 1;
-            min-width: 0; width: 2.75rem; height: 2.75rem; padding: 0;
-            margin: 0; border: 1px solid rgba(255, 255, 255, 0.35);
-            border-radius: 50%; background: rgba(15, 23, 42, 0.82); color: #f8fafc;
+        button.secondary {
+            background: #334155;
+            color: var(--text);
         }
-        button.icon-control .control-icon { margin: 0; }
-        button.icon-control .control-label {
-            position: absolute; width: 1px; height: 1px; padding: 0;
-            margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0);
-            white-space: nowrap; border: 0;
+        .status {
+            margin-top: 1rem;
+            color: var(--muted);
+            min-height: 1.5rem;
         }
-        button.icon-control.off { background: rgba(185, 28, 28, 0.9); }
-        button.media-control.off { background: #475569; color: #e2e8f0; }
-        .control-icon {
-            display: inline-block; width: 1.25rem; margin-right: 0.35rem;
-            font-size: 1.1rem; vertical-align: -0.1rem;
+        .invite {
+            margin-top: 1rem;
+            background: #020617;
+            border: 1px solid #334155;
+            border-radius: 10px;
+            padding: 0.85rem 1rem;
+            word-break: break-all;
+            color: var(--text);
         }
-        textarea {
-            width: 100%; min-height: 120px; border-radius: 10px;
-            border: 1px solid #334155; background: #020617; color: #e2e8f0;
-            padding: 0.75rem; box-sizing: border-box; margin-top: 0.75rem;
-        }
-        #status { margin-top: 1rem; color: #7dd3fc; }
+        .hidden { display: none; }
     </style>
 </head>
 <body>
-    <div id="app" class="container">
-        <h1>WebRTC Signaling Demo</h1>
-        <p>Open this page in two tabs to test call negotiation through the Axum signaling server.</p>
+    <div class="container">
+        <h1>Guest Meeting</h1>
+        <p>Create a new meeting or join an existing one with a room code or invite link.</p>
 
-        <div class="grid">
-            <div class="video-panel">
-                <video ref="localVideo" autoplay muted playsinline></video>
-                <button
-                    class="media-control icon-control"
-                    :class="{ off: !micEnabled }"
-                    type="button"
-                    :title="micEnabled ? 'Turn off microphone' : 'Turn on microphone'"
-                    aria-label="Toggle microphone"
-                    :aria-pressed="String(micEnabled)"
-                    @click="toggleMicrophone"
-                >
-                    <span class="control-icon" aria-hidden="true">{{ micEnabled ? '🎙' : '🔇' }}</span>
-                    <span class="control-label">Mic {{ micEnabled ? "on" : "off" }}</span>
-                </button>
+        <div class="form-grid">
+            <label>
+                Display name
+                <input id="displayName" type="text" maxlength="64" placeholder="Alex" />
+            </label>
+
+            <div class="row">
+                <button id="createMeeting" type="button">Create meeting</button>
+                <button id="joinMeeting" type="button" class="secondary">Join meeting</button>
             </div>
-            <div
-                class="video-panel"
-                v-for="(remote, index) in remoteStreams"
-                :key="remote.id"
-            >
-                <video
-                    autoplay
-                    playsinline
-                    :ref="(element) => setRemoteVideo(element, remote.stream)"
-                ></video>
-                <span class="participant-label">Participant {{ index + 1 }}</span>
-            </div>
+
+            <label>
+                Room code or invite URL
+                <input id="roomInput" type="text" placeholder="room code or https://.../?room=abc123" />
+            </label>
         </div>
 
-        <div style="margin-top: 1rem;">
-            <button type="button" @click="startCall">Start Call</button>
-            <button
-                class="media-control"
-                :class="{ off: !cameraEnabled }"
-                type="button"
-                :title="cameraEnabled ? 'Turn off camera' : 'Turn on camera'"
-                :aria-pressed="String(cameraEnabled)"
-                @click="toggleCamera"
-            >
-                <span class="control-icon" aria-hidden="true">{{ cameraEnabled ? '📹' : '🚫' }}</span>
-                <span class="control-label">Camera {{ cameraEnabled ? 'on' : 'off' }}</span>
-            </button>
-            <button
-                class="media-control"
-                :class="{ off: sharingScreen }"
-                type="button"
-                :title="sharingScreen ? 'Stop sharing screen' : 'Share screen'"
-                :aria-pressed="String(sharingScreen)"
-                @click="toggleScreenSharing"
-            >
-                <span class="control-icon" aria-hidden="true">{{ sharingScreen ? '⏹' : '🖥' }}</span>
-                <span class="control-label">{{ sharingScreen ? 'Stop sharing' : 'Share screen' }}</span>
-            </button>
-        </div>
-
-        <div id="status" role="status" aria-live="polite">{{ status }}</div>
-        <textarea ref="logArea" :value="logs" readonly aria-label="Connection log"></textarea>
+        <div id="status" class="status" role="status" aria-live="polite"></div>
+        <div id="inviteBox" class="invite hidden"></div>
     </div>
 
-    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script>
-        const { createApp, nextTick, onBeforeUnmount, onMounted, ref } = Vue;
+        const displayNameInput = document.getElementById('displayName');
+        const roomInput = document.getElementById('roomInput');
+        const statusEl = document.getElementById('status');
+        const inviteBox = document.getElementById('inviteBox');
 
-        createApp({
-            setup() {
-                const room = 'demo-room';
-                const localVideo = ref(null);
-                const remoteStreams = ref([]);
-                const logArea = ref(null);
-                const status = ref('Connecting to signaling server...');
-                const logs = ref('');
-                const micEnabled = ref(true);
-                const cameraEnabled = ref(true);
-                const sharingScreen = ref(false);
+        function setStatus(message, isError = false) {
+            statusEl.textContent = message;
+            statusEl.style.color = isError ? '#f87171' : '#94a3b8';
+        }
 
-                let peerId = null;
-                let ws;
-                let peerConnection;
-                let localStream;
-                let cameraTrack;
-                let screenStream;
-
-                function appendLog(message) {
-                    const time = new Date().toLocaleTimeString();
-                    logs.value += `[${time}] ${message}\n`;
-                    nextTick(() => {
-                        if (logArea.value) {
-                            logArea.value.scrollTop = logArea.value.scrollHeight;
-                        }
-                    });
+        function parseRoomFromInput(value) {
+            if (!value) return { room: '', inviteUrl: '' };
+            if (/^https?:\/\//i.test(value)) {
+                try {
+                    const url = new URL(value);
+                    const room = url.searchParams.get('room') || url.pathname.split('/').pop();
+                    return { room: room || '', inviteUrl: value };
+                } catch (error) {
+                    return { room: '', inviteUrl: '' };
                 }
+            }
+            return { room: value.trim(), inviteUrl: '' };
+        }
 
-                function updateMediaControls() {
-                    micEnabled.value = Boolean(localStream?.getAudioTracks()[0]?.enabled);
-                    cameraEnabled.value = Boolean(localStream?.getVideoTracks()[0]?.enabled);
-                    sharingScreen.value = Boolean(screenStream);
-                }
+        async function createMeeting() {
+            const displayName = displayNameInput.value.trim();
+            if (!displayName) {
+                setStatus('Please enter a display name first.', true);
+                return;
+            }
 
-                function setRemoteVideo(element, stream) {
-                    if (element && element.srcObject !== stream) element.srcObject = stream;
-                }
+            setStatus('Creating meeting...');
+            const response = await fetch('/api/meeting', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ display_name: displayName }),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                setStatus(data.error || 'Could not create meeting.', true);
+                return;
+            }
 
-                async function initMedia() {
-                    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-                    cameraTrack = localStream.getVideoTracks()[0];
-                    localVideo.value.srcObject = localStream;
-                    updateMediaControls();
-                }
+            inviteBox.textContent = data.invite_url;
+            inviteBox.classList.remove('hidden');
+            roomInput.value = data.room_id;
+            setStatus(`Meeting created. Share this invite: ${data.room_id}`);
+            navigator.clipboard?.writeText(data.invite_url).catch(() => {});
+        }
 
-                function configurePeerConnection() {
-                    peerConnection = new RTCPeerConnection({
-                        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-                    });
-                    localStream.getTracks().forEach((track) => peerConnection.addTrack(track, localStream));
-                    peerConnection.ontrack = (event) => {
-                        const stream = event.streams[0] ?? new MediaStream([event.track]);
-                        const streamPrefix = `relay-${room}-`;
-                        const participantId = stream.id.startsWith(streamPrefix)
-                            ? stream.id.slice(streamPrefix.length)
-                            : stream.id;
-                        if (!remoteStreams.value.some((remote) => remote.id === stream.id)) {
-                            remoteStreams.value.push({ id: stream.id, peerId: participantId, stream });
-                        }
-                        appendLog('Remote participant media received.');
-                    };
-                    peerConnection.onicecandidate = (event) => {
-                        if (!event.candidate) return;
-                        ws.send(JSON.stringify({
-                            type: 'candidate', room, from: peerId, to: '',
-                            candidate: {
-                                candidate: event.candidate.candidate,
-                                sdpMid: event.candidate.sdpMid,
-                                sdpMLineIndex: event.candidate.sdpMLineIndex,
-                            },
-                        }));
-                        appendLog('ICE candidate sent.');
-                    };
-                    peerConnection.onconnectionstatechange = () => {
-                        status.value = `Connection state: ${peerConnection.connectionState}`;
-                        appendLog(`Connection state changed to ${peerConnection.connectionState}.`);
-                    };
-                }
+        async function joinMeeting() {
+            const displayName = displayNameInput.value.trim();
+            const { room, inviteUrl } = parseRoomFromInput(roomInput.value);
+            if (!displayName) {
+                setStatus('Please enter your display name before joining.', true);
+                return;
+            }
+            if (!room) {
+                setStatus('Enter a room code or valid invite URL.', true);
+                return;
+            }
 
-                async function createOffer() {
-                    if (!peerConnection) configurePeerConnection();
-                    const offer = await peerConnection.createOffer();
-                    await peerConnection.setLocalDescription(offer);
-                    ws.send(JSON.stringify({ type: 'offer', room, from: peerId, to: '', sdp: offer.sdp }));
-                    appendLog('Offer sent.');
-                }
+            setStatus('Requesting guest ticket...');
+            const response = await fetch(`/api/meeting/${encodeURIComponent(room)}/ticket`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ display_name: displayName }),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                setStatus(data.error || 'Unable to join that meeting.', true);
+                return;
+            }
 
-                async function replaceVideoTrack(track) {
-                    const sender = peerConnection?.getSenders().find((item) => item.track?.kind === 'video');
-                    if (!sender) return;
-                    await sender.replaceTrack(track);
-                    localStream.removeTrack(localStream.getVideoTracks()[0]);
-                    localStream.addTrack(track);
-                    localVideo.value.srcObject = localStream;
-                    await createOffer();
-                }
+            const joinUrl = inviteUrl || data.invite_url;
+            inviteBox.textContent = joinUrl;
+            inviteBox.classList.remove('hidden');
+            const ticket = new URL(joinUrl || `http://127.0.0.1:3000/?room=${room}`).searchParams.get('ticket') || data.ticket;
+            const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?room=${encodeURIComponent(room)}&ticket=${encodeURIComponent(ticket)}`;
+            setStatus(`Joining room ${room}...`);
+            const socket = new WebSocket(wsUrl);
+            socket.addEventListener('open', () => {
+                setStatus(`Connected to room ${room}.`);
+                window.location.href = `/?room=${encodeURIComponent(room)}&ticket=${encodeURIComponent(ticket)}`;
+            });
+            socket.addEventListener('error', () => {
+                setStatus('Unable to connect to the meeting signaling socket.', true);
+            });
+        }
 
-                async function stopScreenSharing() {
-                    if (!screenStream) return;
-                    const previousScreenStream = screenStream;
-                    screenStream = null;
-                    previousScreenStream.getTracks().forEach((track) => track.stop());
-                    await replaceVideoTrack(cameraTrack);
-                    updateMediaControls();
-                    appendLog('Screen sharing stopped.');
-                }
+        document.getElementById('createMeeting').addEventListener('click', createMeeting);
+        document.getElementById('joinMeeting').addEventListener('click', joinMeeting);
 
-                async function startScreenSharing() {
-                    if (!peerConnection) configurePeerConnection();
-                    screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-                    const screenTrack = screenStream.getVideoTracks()[0];
-                    screenTrack.addEventListener('ended', () => {
-                        stopScreenSharing().catch((error) => appendLog(error.message));
-                    }, { once: true });
-                    await replaceVideoTrack(screenTrack);
-                    updateMediaControls();
-                    appendLog('Screen sharing started.');
-                }
-
-                async function handleSignal(event) {
-                    const data = JSON.parse(event.data);
-                    if (!data || !data.type) return;
-                    if (data.type !== 'welcome' && data.to && data.to !== peerId) return;
-                    appendLog(`Received signal: ${data.type}`);
-
-                    if (data.type === 'peer-joined') {
-                        status.value = 'Peer connected through the media server.';
-                        return;
-                    }
-                    if (data.type === 'peer-left') {
-                        remoteStreams.value = remoteStreams.value.filter(
-                            (remote) => remote.peerId !== data.peer_id,
-                        );
-                        appendLog(`Participant ${data.peer_id} left.`);
-                        return;
-                    }
-                    if (data.type === 'relay-error') {
-                        status.value = `Media relay error: ${data.sdp}`;
-                        appendLog(`Media relay error: ${data.sdp}`);
-                        return;
-                    }
-                    if (data.type === 'welcome') {
-                        peerId = data.peer_id;
-                        status.value = `Connected as ${peerId}.`;
-                        appendLog(`Assigned peer ID ${peerId}.`);
-                        if (localStream) createOffer().catch((error) => appendLog(error.message));
-                        return;
-                    }
-                    if (data.type === 'offer') {
-                        if (!peerConnection) configurePeerConnection();
-                        await peerConnection.setRemoteDescription({ type: 'offer', sdp: data.sdp });
-                        const answer = await peerConnection.createAnswer();
-                        await peerConnection.setLocalDescription(answer);
-                        ws.send(JSON.stringify({ type: 'answer', room, from: peerId, to: data.from, sdp: answer.sdp }));
-                        appendLog('Answer sent.');
-                        return;
-                    }
-                    if (data.type === 'answer') {
-                        await peerConnection.setRemoteDescription({ type: 'answer', sdp: data.sdp });
-                        appendLog('Remote answer applied.');
-                        return;
-                    }
-                    if (data.type === 'candidate' && data.candidate) {
-                        if (!peerConnection) configurePeerConnection();
-                        await peerConnection.addIceCandidate({
-                            candidate: data.candidate.candidate,
-                            sdpMid: data.candidate.sdpMid,
-                            sdpMLineIndex: data.candidate.sdpMLineIndex,
-                        });
-                        appendLog('ICE candidate added.');
-                    }
-                }
-
-                async function startCall() {
-                    if (!peerId) {
-                        appendLog('Waiting for the server to assign a peer ID.');
-                        return;
-                    }
-                    if (!localStream) await initMedia();
-                    if (!peerConnection) configurePeerConnection();
-                    await createOffer();
-                }
-
-                function toggleMicrophone() {
-                    const track = localStream?.getAudioTracks()[0];
-                    if (track) {
-                        track.enabled = !track.enabled;
-                        updateMediaControls();
-                    }
-                }
-
-                function toggleCamera() {
-                    const track = localStream?.getVideoTracks()[0];
-                    if (track) {
-                        track.enabled = !track.enabled;
-                        updateMediaControls();
-                    }
-                }
-
-                async function toggleScreenSharing() {
-                    try {
-                        if (screenStream) await stopScreenSharing();
-                        else await startScreenSharing();
-                    } catch (error) {
-                        appendLog(error.message);
-                        updateMediaControls();
-                    }
-                }
-
-                onMounted(() => {
-                    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-                    ws = new WebSocket(`${protocol}//${location.host}/ws?room=${room}`);
-                    ws.onopen = async () => {
-                        status.value = 'Connected to signaling server.';
-                        try {
-                            await initMedia();
-                        } catch (error) {
-                            status.value = 'Microphone/camera access denied. Grant permissions and refresh.';
-                            appendLog(error.message);
-                        }
-                    };
-                    ws.onmessage = (event) => {
-                        handleSignal(event).catch((error) => appendLog(error.message));
-                    };
-                    ws.onclose = () => {
-                        status.value = 'WebSocket disconnected.';
-                        appendLog('Connection closed. Refresh the page to reconnect.');
-                    };
-                });
-
-                onBeforeUnmount(() => {
-                    ws?.close();
-                    peerConnection?.close();
-                    localStream?.getTracks().forEach((track) => track.stop());
-                    screenStream?.getTracks().forEach((track) => track.stop());
-                });
-
-                return {
-                    cameraEnabled, logs, localVideo, logArea, micEnabled, remoteStreams,
-                    sharingScreen, startCall, status, toggleCamera, toggleMicrophone,
-                    toggleScreenSharing, setRemoteVideo,
-                };
-            },
-        }).mount('#app');
+        const params = new URLSearchParams(window.location.search);
+        const roomFromUrl = params.get('room');
+        const ticketFromUrl = params.get('ticket');
+        if (roomFromUrl) {
+            roomInput.value = roomFromUrl;
+        }
+        if (ticketFromUrl) {
+            inviteBox.textContent = `${window.location.origin}/?room=${roomFromUrl}&ticket=${ticketFromUrl}`;
+            inviteBox.classList.remove('hidden');
+        }
     </script>
 </body>
 </html>

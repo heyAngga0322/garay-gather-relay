@@ -14,13 +14,15 @@ This sprint does not claim full production readiness. Use HMAC-SHA-256 signed, e
 
 ### Monday, November 9: Meeting Creation and Guest Join
 
-- [ ] Replace the fixed `demo-room` UI path with a create/join screen accepting a validated display name and either a room code or invite URL.
-- [ ] Add server endpoints to create a meeting and request admission. Generate unpredictable room IDs and ticket material with a cryptographically secure random source; do not derive identity or credentials from timestamps.
-- [ ] Return a host credential only to the creator and a distinct, short-lived, single-use guest join ticket after guest admission. Bind each ticket to one room, one role, an expiry, and a nonce; atomically consume its nonce at WebSocket admission. Keep invite URLs limited to the room identifier; exchange the ticket for the WebSocket connection and never log credentials.
-- [ ] Store meeting owner, members, room lock/lobby settings, and ticket consumption state in shared `AppState`; delete empty meeting state after the final disconnect.
-- [ ] Keep the existing room-ID validation and capacity enforcement on every admission path, and return actionable HTTP errors for invalid, expired, full, locked, or unknown meetings.
-- [ ] Add route and service tests for create/join, invalid IDs/names, ticket expiry/reuse, capacity rejection, concurrent admission, and state cleanup. Add UI checks for direct invite-link entry and refresh behavior.
-- [ ] Exit criteria: host can create a room and copy an invite; a second browser can join by that invite; a third connection is rejected at the current default capacity; invalid or reused tickets cannot open a WebSocket.
+Current status: complete for the implemented MVP foundation. The project now uses a create/join UI and ticketed admission flow, while the broader Tuesday authorization/lobby work remains separate.
+
+- [x] Replace the fixed `demo-room` UI path with a create/join screen accepting a validated display name and either a room code or invite URL.
+- [x] Add server endpoints to create a meeting and request admission. Generate unpredictable room IDs and ticket material with a cryptographically secure random source; do not derive identity or credentials from timestamps.
+- [x] Return a host credential only to the creator and a distinct, short-lived, single-use guest join ticket after guest admission. Bind each ticket to one room, one role, an expiry, and a nonce; atomically consume its nonce at WebSocket admission. Keep invite URLs limited to the room identifier; exchange the ticket for the WebSocket connection and never log credentials.
+- [x] Store meeting owner, members, room lock/lobby settings, and ticket consumption state in shared `AppState`; delete empty meeting state after the final disconnect.
+- [x] Keep the existing room-ID validation and capacity enforcement on every admission path, and return actionable HTTP errors for invalid, expired, full, locked, or unknown meetings.
+- [x] Add route and service tests for create/join, invalid IDs/names, ticket expiry/reuse, capacity rejection, concurrent admission, and state cleanup. Add UI checks for direct invite-link entry and refresh behavior.
+- [x] Exit criteria: host can create a room and copy an invite; a second browser can join by that invite; a third connection is rejected at the current default capacity; invalid or reused tickets cannot open a WebSocket.
 
 ### Tuesday, November 10: Authorization, Lobby, and Participant State
 
