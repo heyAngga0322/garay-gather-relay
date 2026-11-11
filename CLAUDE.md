@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-`webrtc-axum` is a Rust WebRTC signaling demo. It serves an embedded browser UI over HTTP and relays WebRTC signaling messages over room-scoped WebSockets. The browser uses the native `RTCPeerConnection` API for the actual browser-to-browser media connection.
+`Garay` (Gather Relay) is a Rust WebRTC meeting prototype. It serves an embedded browser UI over HTTP and relays WebRTC signaling messages over room-scoped WebSockets. The browser uses the native `RTCPeerConnection` API for media connections.
 
 The server also creates a server-side `webrtc` crate `PeerConnection` for each connected room/peer pair. This currently provides signaling-side SDP/ICE processing and connection lifecycle management; browser media is not routed through the Rust server.
 

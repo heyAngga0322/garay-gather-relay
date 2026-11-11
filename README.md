@@ -1,6 +1,6 @@
-# WebRTC Axum Media Relay
+# Garay (Gather Relay)
 
-A small-group meeting prototype built with Rust, Axum, Tokio, and the `webrtc` crate. It serves an embedded browser UI, manages room membership and signaling over WebSockets, and relays encoded RTP through server-side WebRTC peer connections. It is not yet a production-ready meeting service.
+Garay (Gather Relay) is a small-group meeting prototype built with Rust, Axum, Tokio, and the `webrtc` crate. It serves the Gather meeting UI, manages room membership and signaling over WebSockets, and relays encoded RTP through server-side WebRTC peer connections. Garay is not yet a production-ready meeting service.
 
 Each browser establishes a WebRTC connection to the Rust server. The server forwards incoming RTP to the other participants in the room; media is not sent directly between browsers.
 

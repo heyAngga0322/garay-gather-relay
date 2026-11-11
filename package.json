@@ -1,5 +1,5 @@
 {
-  "name": "webrtc-axum-browser-tests",
+  "name": "garay-browser-tests",
   "private": true,
   "scripts": {
     "test:browser": "playwright test"
