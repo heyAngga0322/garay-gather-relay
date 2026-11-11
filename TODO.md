@@ -10,7 +10,7 @@ Goal: evolve the demo into a reliable, secure meeting app for small groups. Trea
 
 Deliver a usable guest-based online-meeting MVP as a complete vertical slice: a host creates a meeting, guests join through an invite, the server enforces meeting permissions, participants see and control one another's live media, and the call recovers from common device or network interruptions. Implement and verify working behavior each day; do not mark roadmap items complete based only on design, stubs, or standalone experiments.
 
-This sprint does not claim full production readiness. Use HMAC-SHA-256 signed, expiring meeting tickets with cryptographically random nonces and server-side single-use consumption, plus in-memory meeting state for the MVP; do not introduce a custom account system or pretend guest tickets are user accounts. Keep the default room capacity at 2 unless representative load results justify a change. Scheduling, persistent meeting history, recording, captions, and public deployment remain outside this sprint and stay unchecked.
+This sprint does not claim full production readiness. Use HMAC-SHA-256 signed, expiring meeting tickets with cryptographically random nonces and server-side single-use consumption, plus in-memory meeting state for the MVP; do not introduce a custom account system or pretend guest tickets are user accounts. The default room capacity is 4 per product decision; treat that as a configured limit, not a load-validated supported capacity, until the four-participant acceptance workload passes. Scheduling, persistent meeting history, recording, captions, and public deployment remain outside this sprint and stay unchecked.
 
 ### Monday, November 9: Meeting Creation and Guest Join
 
@@ -36,13 +36,13 @@ Current status: complete for the implemented MVP foundation. The project now use
 
 ### Wednesday, November 11: Complete Participant and Video Experience
 
-- [ ] Replace the demo heading and log-first layout with the meeting room view: room title/invite action, participant roster, responsive local/remote media grid, connection state, and a compact accessible control bar.
-- [ ] Render and remove one stable media tile per remote participant/track, show display names and mic/camera/screen-share states, and preserve the local preview when remote tracks change.
-- [ ] Add grid and active-speaker layouts plus pin/unpin controls; layout changes must only change presentation and must not renegotiate or stop tracks.
-- [ ] Make mic, camera, leave, copy-invite, layout, and pin controls keyboard-operable with accessible names, pressed/selected states, visible focus, and screen-reader status announcements.
-- [ ] Handle permission denial and audio-only/video-only capture independently. Present a usable join state when either device is unavailable instead of blocking the entire meeting.
-- [ ] Add browser tests for two- and three-participant roster transitions, media tile add/remove, pin/layout changes, keyboard controls, and independent audio/video permission failures.
-- [ ] Exit criteria: each participant sees correct names and media states; join/leave updates remove stale tiles; changing layout or pin never interrupts active RTP.
+- [x] Replace the demo heading and log-first layout with the meeting room view: room title/invite action, participant roster, responsive local/remote media grid, connection state, and a compact accessible control bar.
+- [x] Render and remove one stable media tile per remote participant/track, show display names and mic/camera/screen-share states, and preserve the local preview when remote tracks change.
+- [x] Add grid and active-speaker layouts plus pin/unpin controls; layout changes must only change presentation and must not renegotiate or stop tracks.
+- [x] Make mic, camera, leave, copy-invite, layout, and pin controls keyboard-operable with accessible names, pressed/selected states, visible focus, and screen-reader status announcements.
+- [x] Handle permission denial and audio-only/video-only capture independently. Present a usable join state when either device is unavailable instead of blocking the entire meeting.
+- [x] Add browser tests for two- and three-participant roster transitions, media tile add/remove, pin/layout changes, keyboard controls, and independent audio/video permission failures.
+- [x] Exit criteria: each participant sees correct names and media states; join/leave updates remove stale tiles; changing layout or pin never interrupts active RTP. Chromium fake-device tests passed, including repeated three-peer delivery and participant teardown.
 
 ### Thursday, November 12: Screen Sharing, Device Changes, and Recovery
 
@@ -57,7 +57,7 @@ Current status: complete for the implemented MVP foundation. The project now use
 
 - [ ] Run the complete browser flow with automated Chromium peers using fake media devices: create room, join by invite, exchange audio/video, share/stop screen, exercise host admission/removal/mute, disconnect/reconnect, and leave/cleanup.
 - [ ] Add a four-participant relay acceptance workload in an optimized server build with every participant publishing audio and video; verify every expected subscriber receives media, negotiation and teardown complete, and no peer/publication/relay/task state remains after room shutdown.
-- [ ] Keep the default capacity at 2 unless the four-participant workload passes repeatedly with documented host/build conditions and measured CPU, memory, packet delivery, and cleanup. If it does not pass, fix the relay issue or keep capacity unchanged and document the blocker; do not infer capacity from the current single-publisher baseline.
+- [ ] Validate the configured default capacity of 4 with repeated four-participant workloads under documented host/build conditions, measuring CPU, memory, packet delivery, and cleanup. If it does not pass, fix the relay issue or clearly document that 4 is not a supported capacity and revisit the default; do not infer capacity from the current single-publisher baseline.
 - [ ] Run `cargo fmt --check`, `cargo check`, `cargo test`, the browser end-to-end suite, and the optimized multi-participant acceptance workload. Fix regressions in this sprint's scope before calling the MVP complete.
 - [ ] Update `PROGRESS.md` with shipped behavior, exact commands/results, known limitations, any incomplete criteria, and the next release-blocking work. Update `CLAUDE.md` to reflect the actual media-routing and security architecture.
 - [ ] Exit criteria: a fresh checkout can be configured and run from documented steps; automated tests prove the full guest meeting workflow and cleanup; no production-readiness checklist item is marked complete without its own evidence.
@@ -73,7 +73,7 @@ Current status: complete for the implemented MVP foundation. The project now use
 
 ### P0: Multi-Participant Meeting Foundation
 
-- [ ] Measure server resources and choose a supported production room capacity; keep the default at 2 until then.
+- [ ] Measure server resources and choose a supported production room capacity; the configured default is 4, pending representative validation.
 - [ ] Complete and load-test SFU track publication, subscription, renegotiation, and cleanup for multiple participants.
 - [x] Verify late-join track replay and multi-participant RTP delivery with a three-peer negotiation test.
 - [ ] Show a participant roster with join/leave and microphone/camera state.

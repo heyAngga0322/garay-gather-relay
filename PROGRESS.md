@@ -147,3 +147,40 @@ Verified with the project’s standard checks:
 ## Status
 
 The November 10 operational hardening tasks are complete and recorded in the codebase. The remaining open work is the broader Wednesday/Thursday meeting UX and media-system milestones, not the socket safety layer or the authorization flow that was previously blocked.
+
+# Progress Report: November 11, 2026
+
+## Meeting Room Experience
+
+Replaced the create/join-only page with an embedded meeting room view in `src/ui.rs`. It includes a room title and room-only copy invite, live participant roster, local preview, remote media tiles, mic/camera state, connection status, grid/speaker layout controls, pin buttons, and a compact control bar. The layout adapts to narrow viewports, controls use native buttons with accessible names and pressed states, and status changes use a polite live region.
+
+The browser now requests audio and video independently, allowing either capture to fail without blocking the other. It groups relayed tracks by the source peer encoded in the relay stream ID, retains a peer's stream as individual tracks arrive, removes media on track/peer teardown, and analyzes remote audio levels for speaker highlighting. Host credentials are kept in session storage for host refresh; guest links contain only the room ID, and guest tickets are requested for the WebSocket connection.
+
+The first live smoke test exposed a deadlock in `src/app.rs`: participant state handling held the meeting mutex while calling the roster broadcaster, which reacquired that mutex. The state lock is now released before broadcasting.
+
+Automated three-peer Chromium coverage then exposed an SFU replay gap: a late joiner's initial offer had only one audio and one video section, so replaying publications from multiple existing peers left some tracks without negotiated sections. The server now schedules a follow-up offer when replay adds tracks and queues it after the initial answer, preserving message order. The browser serializes inbound signaling messages so an answer is applied before the queued offer. The suite confirms every participant receives both audio and video from both remote peers.
+
+## Validation
+
+- `cargo fmt --check` passed after the final Rust code changes.
+- `cargo check` passed after the final Rust code changes.
+- `cargo test --quiet` passed after the replay renegotiation fix: 18 passed, 0 failed, 2 ignored.
+- `npm run test:browser -- --reporter=list` passed: 4 browser tests, 0 failures. The tests use Chromium fake media devices and a server configured to allow 3 participants.
+- The three-participant RTP, roster, control, and leave test passed three additional consecutive focused runs.
+- The embedded JavaScript parsed successfully with Node's `new Function` syntax check.
+- Browser coverage verifies three participants receive audio/video from both remote peers; stable roster and tile cleanup on leave; local preview track preservation; active RTP bytes and track/sender identity across grid, speaker, and pin changes; keyboard operation of controls; microphone/camera roster updates; room-only copied invites; independent audio/video permission denial; and mobile-width overflow and visible keyboard focus.
+- `npm ci` and `npx playwright install chromium` install the browser-test prerequisites; `npm run test:browser` runs the suite.
+
+## Remaining Verification and Limitations
+
+- The current default room capacity remains 2. The browser suite uses 3 only for verification; this is not representative capacity/load evidence and does not change the default.
+- Speaker highlighting uses browser-side audio-level analysis; this is a presentation hint, not a server-verified speaking indicator.
+- Browser media remains dependent on device permissions and the configured public STUN server. TURN and reconnect recovery are still future work.
+
+# Capacity Default Update: November 11, 2026
+
+Changed `MAX_PEERS_PER_ROOM` from 2 to 4 at the user's request. The default-capacity admission test now verifies four peers are admitted and a fifth is rejected; the explicit `MAX_PEERS_PER_ROOM` override remains available.
+
+This changes the configured admission limit only. It does not establish four participants as a load-validated supported capacity: existing RTP measurements use a short single-publisher workload, and the optimized four-participant, all-publishers acceptance workload remains outstanding. The default should be revisited if that acceptance workload fails.
+
+Validation after the change: `cargo fmt --check`, `cargo check`, and `cargo test --quiet` passed (18 passed, 0 failed, 2 ignored). `npm run test:browser -- --reporter=list` also passed all 4 Chromium tests with the suite's explicit capacity override of 3. The default-admission test verifies four peers are admitted and a fifth is rejected.

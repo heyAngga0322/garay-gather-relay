@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::signaling::{MAX_WS_MESSAGE_SIZE, RoomQuery, SignalMessage, validate_room_id};
 
-pub const MAX_PEERS_PER_ROOM: usize = 2;
+pub const MAX_PEERS_PER_ROOM: usize = 4;
 pub const MAX_DISPLAY_NAME_LENGTH: usize = 64;
 pub const MAX_SIGNALING_STATE_BYTES: usize = 4 * 1024;
 pub const MAX_OUTBOUND_QUEUE_MESSAGES: usize = 32;
@@ -785,22 +785,24 @@ mod tests {
         let state = AppState::new();
         let room_id = "capacity-room";
 
-        let (tx_first, _rx_first) = tokio::sync::mpsc::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
-        let (tx_second, _rx_second) = tokio::sync::mpsc::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
-        let (tx_third, _rx_third) = tokio::sync::mpsc::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
+        for peer_number in 1..=MAX_PEERS_PER_ROOM {
+            let (tx, _rx) = tokio::sync::mpsc::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
+            assert!(
+                try_register_peer(&state, room_id, &format!("peer-{peer_number}"), tx)
+                    .await
+                    .is_ok()
+            );
+        }
 
-        assert!(
-            try_register_peer(&state, room_id, "peer-1", tx_first)
-                .await
-                .is_ok()
-        );
-        assert!(
-            try_register_peer(&state, room_id, "peer-2", tx_second)
-                .await
-                .is_ok()
-        );
-
-        match try_register_peer(&state, room_id, "peer-3", tx_third).await {
+        let (tx, _rx) = tokio::sync::mpsc::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
+        match try_register_peer(
+            &state,
+            room_id,
+            &format!("peer-{}", MAX_PEERS_PER_ROOM + 1),
+            tx,
+        )
+        .await
+        {
             Err(RoomAdmissionError::RoomFull { limit, .. }) => {
                 assert_eq!(limit, MAX_PEERS_PER_ROOM);
             }
@@ -844,22 +846,19 @@ mod tests {
         let state = AppState::new();
         let room_id = "cleanup-room";
 
-        let (tx_first, _rx_first) = tokio::sync::mpsc::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
-        let (tx_second, _rx_second) = tokio::sync::mpsc::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
-        let (tx_third, _rx_third) = tokio::sync::mpsc::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
+        for peer_number in 1..=MAX_PEERS_PER_ROOM {
+            let (tx, _rx) = tokio::sync::mpsc::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
+            assert!(
+                try_register_peer(&state, room_id, &format!("peer-{peer_number}"), tx)
+                    .await
+                    .is_ok()
+            );
+        }
 
+        let rejected_peer = format!("peer-{}", MAX_PEERS_PER_ROOM + 1);
+        let (tx, _rx) = tokio::sync::mpsc::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
         assert!(
-            try_register_peer(&state, room_id, "peer-1", tx_first)
-                .await
-                .is_ok()
-        );
-        assert!(
-            try_register_peer(&state, room_id, "peer-2", tx_second)
-                .await
-                .is_ok()
-        );
-        assert!(
-            try_register_peer(&state, room_id, "peer-3", tx_third)
+            try_register_peer(&state, room_id, &rejected_peer, tx)
                 .await
                 .is_err()
         );
@@ -872,7 +871,7 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(room.len(), MAX_PEERS_PER_ROOM);
-        assert!(room.iter().all(|peer| peer.id != "peer-3"));
+        assert!(room.iter().all(|peer| peer.id != rejected_peer));
     }
 
     #[tokio::test]
@@ -1205,6 +1204,7 @@ async fn handle_socket(
                         participant.display_name = signal.display_name.trim().to_string();
                     }
                 }
+                drop(meetings);
                 state.broadcast_roster_snapshot(&room_id).await;
             }
 
@@ -1216,6 +1216,17 @@ async fn handle_socket(
                 Ok(Some(response)) => {
                     if let Ok(payload) = serde_json::to_string(&response) {
                         let _ = tx.send(payload).await;
+                    }
+                    if response.kind == "answer"
+                        && let Err(error) = state
+                            .webrtc
+                            .flush_queued_negotiation(&room_id, &peer_id)
+                            .await
+                    {
+                        eprintln!(
+                            "queued WebRTC negotiation failed for peer {} in room {}: {}",
+                            peer_id, room_id, error
+                        );
                     }
                 }
                 Ok(None) => {}

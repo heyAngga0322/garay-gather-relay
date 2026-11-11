@@ -177,14 +177,15 @@ impl WebRtcAgent {
                 }
                 pc.set_remote_description(RTCSessionDescription::offer(signal.sdp.clone())?)
                     .await?;
-                self.add_existing_tracks(&key, room).await?;
+                let added_existing_tracks = self.add_existing_tracks(&key, room).await?;
                 let answer = pc.create_answer(None).await?;
                 pc.set_local_description(answer.clone()).await?;
-                self.ready_peers.lock().await.insert(key);
-                self.queued_negotiations
-                    .lock()
-                    .await
-                    .remove(&self.key(room, peer_id));
+                self.ready_peers.lock().await.insert(key.clone());
+                if added_existing_tracks {
+                    self.queued_negotiations.lock().await.insert(key);
+                } else {
+                    self.queued_negotiations.lock().await.remove(&key);
+                }
                 Ok(Some(SignalMessage {
                     kind: "answer".to_owned(),
                     room: room.to_owned(),
@@ -230,6 +231,21 @@ impl WebRtcAgent {
         }
     }
 
+    pub async fn flush_queued_negotiation(
+        &self,
+        room: &str,
+        peer_id: &str,
+    ) -> Result<(), webrtc::error::Error> {
+        let key = self.key(room, peer_id);
+        let negotiation_lock = self.negotiation_lock(&key).await;
+        let _negotiation_guard = negotiation_lock.lock().await;
+        if !self.queued_negotiations.lock().await.remove(&key) {
+            return Ok(());
+        }
+        let pc = self.get(&key).await?;
+        self.send_offer(&key, room, peer_id, &pc).await
+    }
+
     async fn relay_track(
         &self,
         source_key: String,
@@ -271,6 +287,7 @@ impl WebRtcAgent {
             let negotiation_lock = self.negotiation_lock(&destination_key).await;
             let _negotiation_guard = negotiation_lock.lock().await;
             if !self.ready_peers.lock().await.contains(&destination_key) {
+                eprintln!("relay destination not ready: {destination_key} for {publication_key}");
                 continue;
             }
             self.add_relay_track(&publication_key, &source_key, &destination_key, &source)
@@ -352,7 +369,7 @@ impl WebRtcAgent {
         &self,
         destination_key: &str,
         room: &str,
-    ) -> Result<(), webrtc::error::Error> {
+    ) -> Result<bool, webrtc::error::Error> {
         let publications: Vec<_> = self
             .published_tracks
             .lock()
@@ -370,12 +387,14 @@ impl WebRtcAgent {
                 )
             })
             .collect();
+        let mut added_tracks = false;
 
         for (publication_key, source_peer_key, source) in publications {
-            self.add_relay_track(&publication_key, &source_peer_key, destination_key, &source)
+            added_tracks |= self
+                .add_relay_track(&publication_key, &source_peer_key, destination_key, &source)
                 .await?;
         }
-        Ok(())
+        Ok(added_tracks)
     }
 
     async fn add_relay_track(
@@ -384,10 +403,10 @@ impl WebRtcAgent {
         source_peer_key: &str,
         destination_key: &str,
         source: &Arc<dyn TrackRemote>,
-    ) -> Result<(), webrtc::error::Error> {
+    ) -> Result<bool, webrtc::error::Error> {
         let relay_key = format!("{publication_key}->{destination_key}");
         if self.relays.lock().await.contains_key(&relay_key) {
-            return Ok(());
+            return Ok(false);
         }
 
         let kind = source.kind().await;
@@ -398,7 +417,7 @@ impl WebRtcAgent {
                 break;
             }
         }
-        let Some(codec) = codec else { return Ok(()) };
+        let Some(codec) = codec else { return Ok(false) };
         let destination = self.get(destination_key).await?;
         let remote_sdp = destination
             .remote_description()
@@ -420,10 +439,10 @@ impl WebRtcAgent {
             )));
         }
         let Some(source_ssrc) = source.ssrcs().await.first().copied() else {
-            return Ok(());
+            return Ok(false);
         };
         let Some((room, source_peer_id)) = source_peer_key.split_once(':') else {
-            return Ok(());
+            return Ok(false);
         };
         let output = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
             format!("relay-{room}-{source_peer_id}"),
@@ -451,7 +470,7 @@ impl WebRtcAgent {
                 output,
             },
         );
-        Ok(())
+        Ok(true)
     }
 
     async fn send_to_peer(&self, key: &str, signal: SignalMessage) {

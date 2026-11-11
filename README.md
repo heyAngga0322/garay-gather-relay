@@ -11,10 +11,11 @@ Each browser establishes a WebRTC connection to the Rust server. The server forw
 - Server-side SDP offer/answer handling, ICE exchange, and queued renegotiation
 - RTP forwarding between participants through server-side peer connections
 - Late-join replay of existing publications
-- Embedded Vue 3 browser UI loaded from the unpkg CDN
-- Browser camera, microphone, and screen-sharing controls
-- Local preview and multiple remote video tiles
-- Per-room peer limit, configurable with `MAX_PEERS_PER_ROOM` (default: 2)
+- Embedded HTML/CSS/JavaScript meeting UI (no frontend CDN dependency)
+- Meeting creation and guest admission using short-lived join tickets
+- Participant roster, local preview, remote media tiles, and mic/camera controls
+- Grid and active-speaker presentation with pin controls
+- Per-room peer limit, configurable with `MAX_PEERS_PER_ROOM` (default: 4; not yet load-validated)
 - Maximum inbound WebSocket message size of 64 KiB
 - `/health` endpoint
 
@@ -26,8 +27,8 @@ Each browser establishes a WebRTC connection to the Rust server. The server forw
   - `navigator.mediaDevices.getDisplayMedia` for screen sharing
   - `RTCPeerConnection`
   - WebSocket
-- Internet access to load Vue 3 from the unpkg CDN and reach the configured STUN server
-- Camera and microphone permissions
+- Internet access to reach the configured STUN server
+- Camera and microphone permissions for full media; either device can be unavailable independently
 
 ## Run
 
@@ -41,21 +42,21 @@ The server binds to `0.0.0.0:3000`; open the app locally at:
 http://127.0.0.1:3000
 ```
 
-The room peer limit defaults to 2. It can be changed for local testing, for example:
+The configured room peer limit defaults to 4. It can be changed for local testing, for example:
 
 ```sh
 MAX_PEERS_PER_ROOM=3 cargo run
 ```
 
-The current UI uses the fixed room `demo-room`. Open it in two browser tabs and grant camera and microphone permissions. The browser begins negotiation after the server assigns its peer ID; use `Start Call` if you need to retry local media setup. Screen sharing requires a browser that supports display capture.
+Open the app and enter a display name. Create a room to receive a host invite, or join with a room code or invite link. The host invite is copied without exposing the host credential; guest admission requests a short-lived ticket before opening the signaling socket. Open a second browser tab to join and test the two-participant media flow. The UI shows local and remote media, participant state, connection status, and meeting controls. Screen sharing and reconnect recovery are not part of the current UI flow.
 
-For a different room, connect to the WebSocket endpoint directly with a valid room ID:
+For signaling-level testing, connect to the WebSocket endpoint with a valid room ID and an issued ticket:
 
 ```text
-ws://127.0.0.1:3000/ws?room=my-room
+ws://127.0.0.1:3000/ws?room=my-room&ticket=<issued-ticket>
 ```
 
-If the `room` query parameter is omitted, the server uses `demo-room`.
+Meetings and tickets are held in memory and disappear when the server exits. The default configured room capacity is 4, but representative four-participant production load has not been validated; do not treat this setting as a supported-capacity claim.
 
 ## Room and WebSocket Limits
 
@@ -64,7 +65,7 @@ The server enforces room ID, room capacity, and inbound WebSocket message limits
 - Room IDs must be 1-64 characters long.
 - Allowed characters are ASCII letters, numbers, `-`, and `_`.
 - Whitespace and separators like `/` are rejected.
-- Each room admits at most `MAX_PEERS_PER_ROOM` peers; the default is 2.
+- Each room admits at most `MAX_PEERS_PER_ROOM` peers; the configured default is 4.
 - Inbound WebSocket messages larger than 64 KiB are rejected before signal parsing.
 
 Room IDs are validated before the WebSocket upgrade. Capacity is enforced during room admission, and message size is enforced by Axum on the upgraded WebSocket.
@@ -93,6 +94,16 @@ cargo fmt --check
 
 The automated Rust tests cover room and message limits, signaling serialization, WebSocket membership events, offer/answer handling, renegotiation, RTP relay, late-join replay, and relay cleanup. The resource baselines are opt-in ignored tests; see `PROGRESS.md` for their methodology and recorded results.
 
+The Chromium browser suite covers three-participant audio/video delivery, roster and media-tile cleanup, layout and pin changes without interrupting RTP, keyboard controls, mobile-width layout, and independent audio/video permission failures. Install its dependencies and browser once, then run it with:
+
+```sh
+npm ci
+npx playwright install chromium
+npm run test:browser
+```
+
+The Playwright web server starts the application with `MAX_PEERS_PER_ROOM=3` for these local tests; the normal server default is 4.
+
 ## Architecture
 
 ```text
@@ -115,7 +126,7 @@ Each browser negotiates with its own server-side peer connection. The server rou
 - `src/main.rs`: Tokio application entrypoint.
 - `src/app.rs`: Axum routes, shared state, room admission, WebSocket handling, membership notifications, and cleanup.
 - `src/signaling.rs`: Serde models for signaling messages and ICE candidates.
-- `src/ui.rs`: Embedded HTML, CSS, Vue 3 UI, and browser-side WebRTC logic.
+- `src/ui.rs`: Embedded HTML, CSS, and browser-side WebRTC logic.
 - `src/webrtc.rs`: Server-side `webrtc` crate peer connections, SDP negotiation, RTP publication and relay, and track cleanup.
 
 ## Signaling Messages
@@ -125,7 +136,7 @@ Messages use the following structure:
 ```json
 {
   "type": "offer",
-  "room": "demo-room",
+  "room": "sample-room",
   "peer_id": "peer-123",
   "from": "peer-123",
   "to": "peer-456",
@@ -148,29 +159,27 @@ The server overwrites incoming `room`, `peer_id`, and `from` values with the val
 
 ## Browser Call Flow
 
-1. The browser connects to `/ws?room=demo-room` and requests local media.
-2. The server sends a `welcome` message with a server-generated peer ID.
+1. A host creates a meeting or a guest requests admission to an existing meeting.
+2. The browser opens `/ws` using the room ID and its host or guest ticket, then receives a `welcome` message with a server-generated peer ID.
 3. Browser and server exchange SDP and ICE candidates over the WebSocket to establish the browser-to-server peer connection.
 4. The server receives the browser's RTP tracks, creates relay tracks for other room participants, and renegotiates their server-side peer connections.
 5. The server forwards encoded audio/video RTP to the other participants. Existing publications are replayed to a participant who joins later.
 
-The microphone icon is displayed over the top-right of the local video. The camera control is displayed next to `Start Call`. Both controls update their icon, visual state, tooltip, and accessibility state when toggled.
+Microphone and camera controls appear in the meeting control bar. Roster labels and media tiles update from participant state and remote tracks; layout and pin controls do not modify media tracks.
 
 ## Current Limitations and Security Status
 
-- The browser UI is fixed to `demo-room`; there is no meeting creation flow, room picker, or shareable invite UI.
-- Room membership is in memory and is lost when the process exits. There are no accounts, authentication, room authorization, or host roles.
-- Room capacity defaults to 2 and is configurable, but a production-supported capacity has not been established. The recorded resource baseline is a short, single-publisher loopback workload, not a production load test.
-- WebSocket origin validation, connection/signaling rate limits, and bounded outbound-channel backpressure are not implemented. Do not expose this service publicly as-is.
+- Room membership is in memory and is lost when the process exits. There are no persistent accounts or meeting history.
+- Room capacity defaults to 4 by product decision and is configurable, but a production-supported capacity has not been established. The recorded resource baseline is a short, single-publisher loopback workload, not a production load test.
+- Guest tickets and host roles are implemented, but this prototype is not a substitute for account authentication or production security review. Do not expose this service publicly as-is.
 - The server binds to `0.0.0.0:3000`; TLS termination, graceful shutdown, and deployment configuration are not included.
 - RTP is forwarded without decoding or transcoding. RTCP feedback, simulcast/selective forwarding, and production media-quality metrics are not implemented.
 - The browser currently uses Google's public STUN server. TURN configuration is not available and may be required on restrictive networks.
-- The page loads Vue 3 from unpkg, so initial page rendering requires CDN access.
-- Automated browser end-to-end coverage, reconnect recovery, and device selection are not yet implemented.
+- The Chromium suite covers participant media and controls, but full sprint acceptance for moderation, reconnect recovery, device selection, and screen sharing remains outstanding.
 
 ## Acknowledgements
 
-This project builds on the work of the WebRTC.rs team and the Vue.js team. Their open-source contributions and tooling made the signaling and browser UI layers practical and approachable.
+This project builds on the work of the WebRTC.rs team and the Rust and browser API communities. Their open-source contributions and tooling made the signaling and media layers practical and approachable.
 
 ## License
 
