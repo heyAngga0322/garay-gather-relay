@@ -23,6 +23,7 @@ pub const MAX_PEERS_PER_ROOM: usize = 4;
 pub const MAX_DISPLAY_NAME_LENGTH: usize = 64;
 pub const MAX_SIGNALING_STATE_BYTES: usize = 4 * 1024;
 pub const MAX_OUTBOUND_QUEUE_MESSAGES: usize = 32;
+#[allow(dead_code)]
 pub const MAX_SIGNALING_MESSAGES_PER_SECOND: usize = 10;
 
 pub fn validate_display_name(display_name: &str) -> Result<(), String> {
@@ -50,6 +51,7 @@ pub fn validate_signal_state(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct RateLimiter {
     max_events: usize,
@@ -57,6 +59,7 @@ pub struct RateLimiter {
     timestamps: Arc<tokio::sync::Mutex<VecDeque<Instant>>>,
 }
 
+#[allow(dead_code)]
 impl RateLimiter {
     pub fn new(max_events: usize, window: Duration) -> Self {
         Self {
@@ -92,18 +95,23 @@ pub struct AppState {
     max_peers_per_room: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct MeetingTicket {
+    #[allow(dead_code)]
     pub room_id: String,
     pub role: String,
+    #[allow(dead_code)]
     pub nonce: String,
     pub display_name: String,
     pub expires_at_ms: u128,
     pub consumed: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct MeetingState {
+    #[allow(dead_code)]
     pub room_id: String,
     pub owner_name: String,
     pub host_ticket: String,
@@ -138,6 +146,7 @@ pub struct GuestTicketResponse {
     pub invite_url: String,
 }
 
+#[allow(dead_code)]
 impl AppState {
     pub fn new() -> Self {
         Self::with_room_capacity(MAX_PEERS_PER_ROOM)
@@ -990,7 +999,7 @@ mod tests {
 
     #[test]
     fn rate_limiter_blocks_bursts() {
-        let mut limiter = RateLimiter::new(2, std::time::Duration::from_secs(1));
+        let limiter = RateLimiter::new(2, std::time::Duration::from_secs(1));
         assert!(limiter.check());
         assert!(limiter.check());
         assert!(!limiter.check());

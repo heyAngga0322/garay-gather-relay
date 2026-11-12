@@ -46,12 +46,14 @@ Current status: complete for the implemented MVP foundation. The project now use
 
 ### Thursday, November 12: Screen Sharing, Device Changes, and Recovery
 
-- [ ] Complete screen sharing as a room-wide state transition: replace the outgoing video track, publish the sharer's identity/state, restore the selected camera track on browser capture end, and clean up renegotiation on stop, permission denial, or disconnect.
-- [ ] Add camera and microphone device selectors populated from `enumerateDevices`; apply device changes to active senders without losing the meeting, and handle device removal or permission revocation with a clear fallback state.
-- [ ] Implement bounded exponential WebSocket reconnect with visible reconnecting/failed states, rejoin using a fresh ticket, refresh roster state, and recreate/re-negotiate the peer connection without duplicating media tiles or forwarding tasks.
-- [ ] Recover from failed ICE/peer-connection state with a bounded ICE restart or controlled peer-connection rebuild; stop retrying and show a recoverable leave/rejoin action after the retry budget is exhausted.
-- [ ] Add tests for screen-share start/end and browser-ended capture, device replacement/removal, WebSocket interruption, ICE failure, successful recovery, exhausted retries, and cleanup after leave during recovery.
-- [ ] Exit criteria: screen capture ending returns to camera when available; device changes do not create duplicate tracks; temporary transport loss restores the call and roster, while permanent failure presents a clear action and leaves no server-side peer or relay state.
+Status as of 2026-11-12: complete and verified. The Thursday slice is implemented and passes the relevant Rust and browser checks; the remaining open work is Friday's acceptance and load validation, not the Thursday recovery features.
+
+- [x] Complete screen sharing as a room-wide state transition: replace the outgoing video track, publish the sharer's identity/state, restore the selected camera track on browser capture end, and clean up renegotiation on stop, permission denial, or disconnect.
+- [x] Add camera and microphone device selectors populated from `enumerateDevices`; apply device changes to active senders without losing the meeting, and handle device removal or permission revocation with a clear fallback state.
+- [x] Implement bounded exponential WebSocket reconnect with visible reconnecting/failed states, rejoin using a fresh ticket, refresh roster state, and recreate/re-negotiate the peer connection without duplicating media tiles or forwarding tasks.
+- [x] Recover from failed ICE/peer-connection state with a bounded ICE restart or controlled peer-connection rebuild; stop retrying and show a recoverable leave/rejoin action after the retry budget is exhausted.
+- [x] Add tests for screen-share start/end and browser-ended capture, device replacement/removal, WebSocket interruption, ICE failure, successful recovery, exhausted retries, and cleanup after leave during recovery.
+- [x] Exit criteria: screen capture ending returns to camera when available; device changes do not create duplicate tracks; temporary transport loss restores the call and roster, while permanent failure presents a clear action and leaves no server-side peer or relay state.
 
 ### Friday, November 13: End-to-End Acceptance and MVP Closeout
 

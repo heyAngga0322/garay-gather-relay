@@ -22,6 +22,17 @@ async function newMeetingPage(browser, name, deniedDevice = '') {
     const NativeWebSocket = window.WebSocket;
     window.__peerConnections = [];
     window.__meetingSockets = [];
+    Object.defineProperty(navigator.mediaDevices, 'enumerateDevices', {
+      configurable: true,
+      value: async () => [
+        { deviceId: 'default-audio', kind: 'audioinput', label: 'Default microphone', groupId: 'default-group' },
+        { deviceId: 'default-video', kind: 'videoinput', label: 'Default camera', groupId: 'default-group' },
+      ],
+    });
+    Object.defineProperty(navigator.mediaDevices, 'getDisplayMedia', {
+      configurable: true,
+      value: async () => new MediaStream(),
+    });
     window.RTCPeerConnection = function (...args) {
       const connection = new NativePeerConnection(...args);
       window.__peerConnections.push(connection);
@@ -180,6 +191,48 @@ test('three participants see stable media tiles and roster; controls preserve RT
   await guestA.page.getByRole('button', { name: 'Leave' }).click();
   await host.page.getByRole('button', { name: 'Leave' }).click();
   await Promise.all([host.context.close(), guestA.context.close(), guestB.context.close()]);
+});
+
+test('screen sharing and device selectors are available in the meeting controls', async ({ browser }) => {
+  const participant = await createRoom(browser, 'Screen user');
+  await expect(participant.page.getByRole('button', { name: /share screen/i })).toBeVisible();
+  await expect(participant.page.locator('#microphoneDevice')).toBeVisible();
+  await expect(participant.page.locator('#cameraDevice')).toBeVisible();
+  await participant.page.locator('#microphoneDevice').selectOption('default-audio');
+  await participant.page.locator('#cameraDevice').selectOption('default-video');
+  await participant.page.getByRole('button', { name: /share screen/i }).click();
+  await expect(participant.page.getByRole('button', { name: /stop sharing/i })).toBeVisible();
+  await participant.page.getByRole('button', { name: 'Leave' }).click();
+});
+
+test('signaling disconnects reconnect with a fresh ticket and the media surface restores', async ({ browser }) => {
+  const host = await createRoom(browser, 'Host reconnect');
+  const room = new URL(host.page.url()).searchParams.get('room');
+  const guest = await joinRoom(browser, 'Guest reconnect', room);
+
+  await guest.page.evaluate(() => {
+    const socket = window.__meetingSockets[window.__meetingSockets.length - 1];
+    if (socket) socket.close();
+  });
+
+  await expect.poll(async () => guest.page.evaluate(() => window.__meetingSockets.length), { timeout: 20000 }).toBeGreaterThan(1);
+  await expect.poll(async () => guest.page.locator('#meetingStatus').textContent(), { timeout: 20000 }).toContain('Connected');
+  await expect.poll(async () => {
+    const total = await guest.page.locator('#rosterCount').textContent();
+    const match = total.match(/(\d+) here/);
+    return Number(match?.[1] ?? 0);
+  }, { timeout: 20000 }).toBeGreaterThanOrEqual(2);
+
+  await guest.page.getByRole('button', { name: 'Leave' }).click();
+  await host.page.getByRole('button', { name: 'Leave' }).click();
+});
+
+test('peer connection rebuild is triggered from the UI recovery hook', async ({ browser }) => {
+  const participant = await createRoom(browser, 'Recovery user');
+  await participant.page.evaluate(() => window.__forcePeerRecovery());
+  await expect(participant.page.locator('#meetingStatus')).toContainText('Rebuilding connection');
+  await expect.poll(async () => participant.page.evaluate(() => window.__peerConnections.length), { timeout: 20000 }).toBeGreaterThan(1);
+  await participant.page.getByRole('button', { name: 'Leave' }).click();
 });
 
 for (const deniedDevice of ['audio', 'video']) {

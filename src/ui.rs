@@ -114,6 +114,11 @@ pub const INDEX_HTML: &str = r###"
         .segmented { display: inline-flex; gap: 3px; padding: 3px; border: 1px solid var(--line); border-radius: 6px; background: #101513; }
         .segmented button { min-height: 34px; padding: 6px 11px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); }
         .segmented button[aria-pressed="true"] { background: var(--surface-soft); color: var(--ink); }
+        .device-picker { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
+        .device-picker select {
+            min-height: 36px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 5px;
+            background: #111714; color: var(--ink);
+        }
         .hidden { display: none !important; }
         @media (max-width: 760px) {
             .topbar { min-height: 58px; padding: 0 16px; }
@@ -176,6 +181,15 @@ pub const INDEX_HTML: &str = r###"
                 <div class="control-group">
                     <button id="micToggle" class="button control-button" type="button" aria-label="Turn microphone off" aria-pressed="true">Mic on</button>
                     <button id="cameraToggle" class="button control-button" type="button" aria-label="Turn camera off" aria-pressed="true">Camera on</button>
+                    <button id="screenShareToggle" class="button secondary control-button" type="button" aria-label="Share screen" aria-pressed="false">Share screen</button>
+                </div>
+                <div class="control-group">
+                    <label class="device-picker" for="microphoneDevice">Mic input
+                        <select id="microphoneDevice" aria-label="Microphone device"></select>
+                    </label>
+                    <label class="device-picker" for="cameraDevice">Camera
+                        <select id="cameraDevice" aria-label="Camera device"></select>
+                    </label>
                 </div>
                 <div class="segmented" role="group" aria-label="Video layout">
                     <button type="button" data-layout-choice="grid" aria-pressed="true">Grid</button>
@@ -212,6 +226,17 @@ pub const INDEX_HTML: &str = r###"
         let mediaNotice = '';
         let audioContext;
         let speakerFrame = 0;
+        let microphoneDeviceId = '';
+        let cameraDeviceId = '';
+        let screenShareStream = null;
+        let screenShareActive = false;
+        let currentAudioTrack = null;
+        let currentCameraTrack = null;
+        let reconnectAttempts = 0;
+        let reconnectTimer = null;
+        let isReconnecting = false;
+        let isLeavingMeeting = false;
+        let peerRebuildInProgress = false;
 
         function setStatus(target, text, isError = false) {
             target.textContent = text;
@@ -379,10 +404,17 @@ pub const INDEX_HTML: &str = r###"
             if (local) {
                 local.muted = muted;
                 local.camera_on = cameraOn;
+                local.screen_share = screenShareActive;
                 updateTile(currentPeerId);
                 renderRoster();
             }
-            sendSignal({ type: 'state', display_name: currentName, muted, camera_on: cameraOn, screen_share: false });
+            sendSignal({
+                type: 'state',
+                display_name: currentName,
+                muted,
+                camera_on: cameraOn,
+                screen_share: screenShareActive,
+            });
         }
 
         function setToggle(button, enabled, name, onText, offText) {
@@ -391,20 +423,172 @@ pub const INDEX_HTML: &str = r###"
             button.setAttribute('aria-label', `${enabled ? 'Turn' : 'Turn'} ${name} ${enabled ? 'off' : 'on'}`);
         }
 
+        function queueReconnect() {
+            if (isLeavingMeeting || meeting.classList.contains('hidden') || isReconnecting) return;
+            const attemptNumber = reconnectAttempts + 1;
+            reconnectAttempts = attemptNumber;
+            isReconnecting = true;
+            const delayMs = Math.min(500 * Math.pow(2, reconnectAttempts - 1), 8000);
+            setStatus(meetingStatus, `Reconnecting to the meeting (${attemptNumber}/5)...`, false);
+            clearTimeout(reconnectTimer);
+            reconnectTimer = setTimeout(async () => {
+                try {
+                    const freshTicket = await requestJson(`/api/meeting/${encodeURIComponent(currentRoom)}/ticket`, {
+                        display_name: currentName,
+                    });
+                    if (!freshTicket?.ticket) throw new Error('No fresh ticket received.');
+                    await connectToRoom(currentRoom, freshTicket.ticket, currentName, { reconnect: true });
+                    isReconnecting = false;
+                    reconnectAttempts = 0;
+                } catch (error) {
+                    if (reconnectAttempts >= 5) {
+                        isReconnecting = false;
+                        setStatus(meetingStatus, 'Connection failed. Leave and rejoin to continue.', true);
+                        return;
+                    }
+                    queueReconnect();
+                }
+            }, delayMs);
+        }
+
+        async function rebuildPeerConnection() {
+            if (peerRebuildInProgress || meeting.classList.contains('hidden') || !currentRoom || isLeavingMeeting) return;
+            peerRebuildInProgress = true;
+            setStatus(meetingStatus, 'Media connection degraded. Rebuilding connection...', true);
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = undefined;
+            }
+            await makePeerConnection();
+            if (peerConnection && socket?.readyState === WebSocket.OPEN) {
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                sendSignal({ type: 'offer', sdp: offer.sdp });
+            }
+            peerRebuildInProgress = false;
+        }
+
+        if (typeof window !== 'undefined') {
+            window.__forcePeerRecovery = async () => {
+                await rebuildPeerConnection();
+            };
+        }
+
+        function setScreenShareButtonState() {
+            const button = byId('screenShareToggle');
+            button.textContent = screenShareActive ? 'Stop sharing' : 'Share screen';
+            button.setAttribute('aria-pressed', String(screenShareActive));
+            button.setAttribute('aria-label', screenShareActive ? 'Stop sharing screen' : 'Share screen');
+        }
+
+        async function populateDeviceChoices() {
+            const audioSelect = byId('microphoneDevice');
+            const cameraSelect = byId('cameraDevice');
+            if (!audioSelect || !cameraSelect || !navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+                return;
+            }
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const audioDevices = devices.filter((device) => device.kind === 'audioinput');
+                const videoDevices = devices.filter((device) => device.kind === 'videoinput');
+                const buildOptions = (select, items, fallbackText) => {
+                    const currentValue = select.value || '';
+                    select.innerHTML = '';
+                    const fallback = document.createElement('option');
+                    fallback.value = '';
+                    fallback.textContent = fallbackText;
+                    select.append(fallback);
+                    for (const device of items) {
+                        const option = document.createElement('option');
+                        option.value = device.deviceId || '';
+                        option.textContent = device.label || `Device ${device.deviceId || 'Unknown'}`;
+                        select.append(option);
+                    }
+                    if (currentValue && [...select.options].some((option) => option.value === currentValue)) {
+                        select.value = currentValue;
+                    } else if (items[0]) {
+                        select.value = items[0].deviceId || '';
+                    } else {
+                        select.value = '';
+                    }
+                };
+                buildOptions(audioSelect, audioDevices, 'Default microphone');
+                buildOptions(cameraSelect, videoDevices, 'Default camera');
+                microphoneDeviceId = audioDevices[0]?.deviceId || '';
+                cameraDeviceId = videoDevices[0]?.deviceId || '';
+            } catch {
+                microphoneDeviceId = '';
+                cameraDeviceId = '';
+            }
+        }
+
+        async function refreshLocalMedia() {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                return;
+            }
+            try {
+                const requestedAudio = microphoneDeviceId ? { deviceId: { exact: microphoneDeviceId } } : true;
+                const requestedVideo = cameraDeviceId ? { deviceId: { exact: cameraDeviceId } } : true;
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: requestedAudio,
+                    video: requestedVideo,
+                });
+                const nextAudio = stream.getAudioTracks()[0] || null;
+                const nextVideo = stream.getVideoTracks()[0] || null;
+                for (const track of localStream.getTracks()) track.stop();
+                localStream = new MediaStream();
+                if (nextAudio) {
+                    localStream.addTrack(nextAudio);
+                    currentAudioTrack = nextAudio;
+                }
+                if (nextVideo) {
+                    localStream.addTrack(nextVideo);
+                    currentCameraTrack = nextVideo;
+                }
+                const localTile = mediaTile('local-preview', true);
+                localTile.dataset.peerId = 'local-preview';
+                localTile.querySelector('video').srcObject = localStream;
+                if (peerConnection) {
+                    const sender = peerConnection.getSenders().find((candidate) => candidate.track?.kind === 'video');
+                    if (sender) {
+                        sender.replaceTrack(screenShareActive && screenShareStream?.getVideoTracks()[0] ? screenShareStream.getVideoTracks()[0] : currentCameraTrack || null);
+                    }
+                }
+                const audioOn = Boolean(currentAudioTrack?.enabled);
+                const videoOn = Boolean(currentCameraTrack?.enabled);
+                setToggle(byId('micToggle'), audioOn, 'microphone', 'Mic on', 'Mic off');
+                setToggle(byId('cameraToggle'), videoOn, 'camera', 'Camera on', 'Camera off');
+                publishLocalState();
+            } catch (error) {
+                setStatus(meetingStatus, `Could not switch media devices: ${error.message || 'Permission denied'}.`, true);
+            }
+        }
+
         async function captureLocalMedia() {
             localStream = new MediaStream();
             const outcomes = await Promise.all([
-                ['audio', { audio: true, video: false }],
-                ['video', { audio: false, video: true }],
+                ['audio', {
+                    audio: microphoneDeviceId ? { deviceId: { exact: microphoneDeviceId } } : true,
+                    video: false,
+                }],
+                ['video', {
+                    audio: false,
+                    video: cameraDeviceId ? { deviceId: { exact: cameraDeviceId } } : true,
+                }],
             ].map(async ([kind, constraints]) => {
                 try {
                     const stream = await navigator.mediaDevices.getUserMedia(constraints);
-                    for (const track of stream.getTracks()) localStream.addTrack(track);
+                    for (const track of stream.getTracks()) {
+                        localStream.addTrack(track);
+                        if (kind === 'audio') currentAudioTrack = track;
+                        if (kind === 'video') currentCameraTrack = track;
+                    }
                     return { kind, ok: true };
                 } catch (error) {
                     return { kind, ok: false, error };
                 }
             }));
+            await populateDeviceChoices();
             const localTile = mediaTile('local-preview', true);
             localTile.dataset.peerId = 'local-preview';
             localTile.querySelector('video').srcObject = localStream;
@@ -422,6 +606,49 @@ pub const INDEX_HTML: &str = r###"
             if (mediaNotice) setStatus(meetingStatus, mediaNotice, !audioOn && !videoOn);
         }
 
+        async function stopScreenShare(showStatus = true) {
+            if (screenShareStream) {
+                for (const track of screenShareStream.getTracks()) track.stop();
+                screenShareStream = null;
+            }
+            screenShareActive = false;
+            setScreenShareButtonState();
+            const sender = peerConnection?.getSenders().find((candidate) => candidate.track?.kind === 'video');
+            if (sender && currentCameraTrack) sender.replaceTrack(currentCameraTrack);
+            if (showStatus) setStatus(meetingStatus, 'Screen sharing stopped.');
+            publishLocalState();
+        }
+
+        async function startScreenShare() {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+                setStatus(meetingStatus, 'Screen sharing is not available in this browser.', true);
+                return;
+            }
+            try {
+                const displayStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: { frameRate: 30 },
+                    audio: false,
+                });
+                screenShareStream = displayStream;
+                screenShareActive = true;
+                const screenTrack = displayStream.getVideoTracks()[0];
+                if (screenTrack) {
+                    const sender = peerConnection?.getSenders().find((candidate) => candidate.track?.kind === 'video');
+                    if (sender) sender.replaceTrack(screenTrack);
+                }
+                setScreenShareButtonState();
+                for (const track of displayStream.getVideoTracks()) {
+                    track.addEventListener('ended', () => {
+                        if (screenShareActive) stopScreenShare(false);
+                    }, { once: true });
+                }
+                setStatus(meetingStatus, 'Screen sharing started.');
+                publishLocalState();
+            } catch (error) {
+                setStatus(meetingStatus, `Screen sharing was cancelled: ${error.message || 'permission denied'}.`, true);
+            }
+        }
+
         async function makePeerConnection() {
             peerConnection = new RTCPeerConnection({
                 iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }],
@@ -432,10 +659,25 @@ pub const INDEX_HTML: &str = r###"
             });
             peerConnection.addEventListener('connectionstatechange', () => {
                 const state = peerConnection.connectionState;
-                if (state === 'connected') setStatus(meetingStatus, `Connected. Your media is live.${mediaNotice ? ` ${mediaNotice}` : ''}`, !localStream.getAudioTracks().length && !localStream.getVideoTracks().length);
-                else if (state === 'connecting') setStatus(meetingStatus, 'Connecting media...');
-                else if (state === 'failed') setStatus(meetingStatus, 'Media connection failed. Leave and rejoin to try again.', true);
-                else if (state === 'disconnected') setStatus(meetingStatus, 'Media connection interrupted. Waiting for recovery...', true);
+                if (state === 'connected') {
+                    setStatus(meetingStatus, `Connected. Your media is live.${mediaNotice ? ` ${mediaNotice}` : ''}`, !localStream.getAudioTracks().length && !localStream.getVideoTracks().length);
+                    return;
+                }
+                if (state === 'connecting') {
+                    setStatus(meetingStatus, 'Connecting media...');
+                    return;
+                }
+                if (state === 'failed' || state === 'disconnected') {
+                    if (!isLeavingMeeting && !isReconnecting && !peerRebuildInProgress) {
+                        rebuildPeerConnection();
+                    }
+                    return;
+                }
+                if (state === 'closed') {
+                    if (!isLeavingMeeting && !isReconnecting && !peerRebuildInProgress) {
+                        queueReconnect();
+                    }
+                }
             });
             peerConnection.addEventListener('track', (event) => {
                 const streamId = event.streams[0]?.id || '';
@@ -565,29 +807,80 @@ pub const INDEX_HTML: &str = r###"
             if (message.type === 'error') setStatus(meetingStatus, message.sdp || 'The meeting rejected an action.', true);
         }
 
-        async function connectToRoom(room, ticket, name) {
+        async function connectToRoom(room, ticket, name, options = {}) {
             currentRoom = room;
             currentName = name;
+            isLeavingMeeting = false;
+            isReconnecting = false;
+            if (!options.reconnect) {
+                reconnectAttempts = 0;
+                clearTimeout(reconnectTimer);
+            }
             byId('meetingTitle').textContent = `${name}'s meeting`;
             byId('roomCode').textContent = room;
             entry.classList.add('hidden');
             meeting.classList.remove('hidden');
             history.replaceState({}, '', `/?room=${encodeURIComponent(room)}`);
-            await captureLocalMedia();
-            await makePeerConnection();
+            if (options.reconnect) {
+                participants.clear();
+                remoteMedia.clear();
+                mediaGrid.replaceChildren();
+                currentPeerId = '';
+                if (peerConnection) {
+                    peerConnection.close();
+                    peerConnection = undefined;
+                }
+                if (localStream.getTracks().length) {
+                    const preview = mediaTile('local-preview', true);
+                    preview.dataset.peerId = 'local-preview';
+                    preview.querySelector('video').srcObject = localStream;
+                    preview.querySelector('.tile-name').textContent = `${name} (you)`;
+                    preview.querySelector('.tile-state').textContent = '';
+                    preview.querySelector('.pin-button').hidden = true;
+                }
+            }
+            if (!localStream.getTracks().length) {
+                await captureLocalMedia();
+            }
+            if (!peerConnection) {
+                await makePeerConnection();
+            }
             const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
             const url = `${scheme}//${location.host}/ws?room=${encodeURIComponent(room)}&ticket=${encodeURIComponent(ticket)}&display_name=${encodeURIComponent(name)}`;
-            socket = new WebSocket(url);
-            socket.addEventListener('open', () => setStatus(meetingStatus, 'Signaling connected. Joining media...'));
-            socket.addEventListener('message', (event) => {
+            const activeSocket = new WebSocket(url);
+            socket = activeSocket;
+            activeSocket.addEventListener('open', () => {
+                if (socket !== activeSocket) return;
+                if (options.reconnect) {
+                    setStatus(meetingStatus, 'Connection restored. Rejoining media...');
+                } else {
+                    setStatus(meetingStatus, 'Signaling connected. Joining media...');
+                }
+                if (peerConnection && peerConnection.signalingState === 'stable') {
+                    const offer = peerConnection.createOffer();
+                    peerConnection.setLocalDescription(offer).then(() => {
+                        sendSignal({ type: 'offer', sdp: offer.sdp });
+                    }).catch(() => {});
+                }
+            });
+            activeSocket.addEventListener('message', (event) => {
+                if (socket !== activeSocket) return;
                 signalQueue = signalQueue.then(() => handleSignal(JSON.parse(event.data))).catch((error) => {
                     setStatus(meetingStatus, `Meeting signal failed: ${error.message}`, true);
                 });
             });
-            socket.addEventListener('close', () => {
-                if (!meeting.classList.contains('hidden')) setStatus(meetingStatus, 'Signaling disconnected. Leave and rejoin to continue.', true);
+            activeSocket.addEventListener('close', () => {
+                if (socket !== activeSocket) return;
+                if (!meeting.classList.contains('hidden') && !isLeavingMeeting && !isReconnecting) {
+                    queueReconnect();
+                }
             });
-            socket.addEventListener('error', () => setStatus(meetingStatus, 'Could not connect to meeting signaling.', true));
+            activeSocket.addEventListener('error', () => {
+                if (socket !== activeSocket) return;
+                if (!meeting.classList.contains('hidden') && !isLeavingMeeting && !isReconnecting) {
+                    queueReconnect();
+                }
+            });
         }
 
         async function requestJson(url, payload) {
@@ -644,6 +937,11 @@ pub const INDEX_HTML: &str = r###"
         }
 
         function leaveMeeting() {
+            isLeavingMeeting = true;
+            isReconnecting = false;
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+            reconnectAttempts = 0;
             if (speakerFrame) cancelAnimationFrame(speakerFrame);
             speakerFrame = 0;
             socket?.close();
@@ -666,6 +964,10 @@ pub const INDEX_HTML: &str = r###"
         byId('createMeeting').addEventListener('click', createMeeting);
         byId('copyInvite').addEventListener('click', copyInvite);
         byId('leaveMeeting').addEventListener('click', leaveMeeting);
+        byId('screenShareToggle').addEventListener('click', () => {
+            if (screenShareActive) stopScreenShare();
+            else startScreenShare();
+        });
         byId('micToggle').addEventListener('click', (event) => {
             const track = localStream.getAudioTracks()[0];
             if (!track) return setStatus(meetingStatus, 'No microphone is available.', true);
@@ -679,6 +981,14 @@ pub const INDEX_HTML: &str = r###"
             track.enabled = !track.enabled;
             setToggle(event.currentTarget, track.enabled, 'camera', 'Camera on', 'Camera off');
             publishLocalState();
+        });
+        byId('microphoneDevice').addEventListener('change', async (event) => {
+            microphoneDeviceId = event.target.value || '';
+            if (microphoneDeviceId) await refreshLocalMedia();
+        });
+        byId('cameraDevice').addEventListener('change', async (event) => {
+            cameraDeviceId = event.target.value || '';
+            if (cameraDeviceId) await refreshLocalMedia();
         });
         document.querySelectorAll('[data-layout-choice]').forEach((button) => {
             button.addEventListener('click', () => {

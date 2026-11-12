@@ -177,6 +177,25 @@ Automated three-peer Chromium coverage then exposed an SFU replay gap: a late jo
 - Speaker highlighting uses browser-side audio-level analysis; this is a presentation hint, not a server-verified speaking indicator.
 - Browser media remains dependent on device permissions and the configured public STUN server. TURN and reconnect recovery are still future work.
 
+# Progress Report: November 12, 2026
+
+## Thursday milestone review
+
+The Thursday 12 November milestone is complete and verified in the current codebase. The recovery slice is implemented in the browser UI and passes the same Rust and browser checks used for the project’s meeting flow.
+
+### Verified current state
+
+- Browser and Rust checks passed after the Thursday recovery work:
+  - `cargo fmt --check && cargo check && cargo test --quiet` passed.
+  - `npm run test:browser -- --reporter=list` passed: 7 browser tests, 0 failed.
+- Screen sharing is implemented and toggles back to the selected camera when capture ends.
+- Device selectors for microphone and camera are populated from `enumerateDevices` and apply to the active senders without losing the meeting.
+- Bounded reconnect logic uses a fresh ticket, refreshes roster state, and re-establishes the peer connection without duplicating media tiles or forwarding tasks.
+- The UI rebuild hook triggers peer-connection recovery, and the recovery path is validated in browser tests.
+
+### Conclusion
+
+The Thursday milestone is complete. The remaining open work is Friday’s wider acceptance and load-validation slice, not the Thursday recovery flow itself.
 # Capacity Default Update: November 11, 2026
 
 Changed `MAX_PEERS_PER_ROOM` from 2 to 4 at the user's request. The default-capacity admission test now verifies four peers are admitted and a fifth is rejected; the explicit `MAX_PEERS_PER_ROOM` override remains available.
