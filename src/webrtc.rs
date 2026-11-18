@@ -177,22 +177,7 @@ impl WebRtcAgent {
                 }
                 pc.set_remote_description(RTCSessionDescription::offer(signal.sdp.clone())?)
                     .await?;
-
-            // Debug: print transceivers after setting remote description
-            let transceivers = pc.get_transceivers().await;
-            eprintln!("  DEBUG: after set_remote_description for {key}, transceivers:");
-            for (i, t) in transceivers.iter().enumerate() {
-                let direction = t.direction().await;
-                let mid = t.mid().await.unwrap_or_default();
-                let sender = match t.sender().await {
-                    Ok(Some(s)) => s,
-                    Ok(None) | Err(_) => continue,
-                };
-                let sender_track = sender.track().track_id().await;
-                eprintln!("    transceiver {}: mid={:?}, direction={:?}, sender_track={:?}", i, mid, direction, sender_track);
-            }
-
-            let added_existing_tracks = self.add_existing_tracks(&key, room).await?;
+                let added_existing_tracks = self.add_existing_tracks(&key, room).await?;
                 let answer = pc.create_answer(None).await?;
                 pc.set_local_description(answer.clone()).await?;
                 self.ready_peers.lock().await.insert(key.clone());
@@ -336,20 +321,6 @@ impl WebRtcAgent {
             self.add_relay_track(&publication_key, &source_key, &destination_key, &source)
                 .await?;
 
-            // Debug: print transceivers after adding relay track
-            let transceivers = pc.get_transceivers().await;
-            eprintln!("  DEBUG: after add_relay_track for {publication_key} -> {destination_key}, transceivers:");
-            for (i, t) in transceivers.iter().enumerate() {
-                let direction = t.direction().await;
-                let mid = t.mid().await.unwrap_or_default();
-                let sender = match t.sender().await {
-                    Ok(Some(s)) => s,
-                    Ok(None) | Err(_) => continue,
-                };
-                let sender_track = sender.track().track_id().await;
-                eprintln!("    transceiver {}: mid={:?}, direction={:?}, sender_track={:?}", i, mid, direction, sender_track);
-            }
-
             let destination_peer = destination_key.split(':').nth(1).unwrap_or_default();
             self.request_renegotiation_locked(&destination_key, room, destination_peer, &pc)
                 .await?;
@@ -383,9 +354,6 @@ impl WebRtcAgent {
                             ) | None => break,
                         };
                         packet_count += 1;
-                        if packet_count % 1000 == 1 {
-                            eprintln!("relay_track {}: packet_count={}, pt={}, ssrc={}", publication_key, packet_count, packet.header.payload_type, packet.header.ssrc);
-                        }
                         let outputs: Vec<_> = agent
                             .relays
                             .lock()
@@ -406,9 +374,6 @@ impl WebRtcAgent {
                             let output_ssrc = output.ssrcs().await.first().copied();
                             if let Some(ssrc) = output_ssrc {
                                 packet.header.ssrc = ssrc;
-                            }
-                            if packet_count % 1000 == 1 {
-                                eprintln!("  forwarding to {}: output_ssrc={:?}, packet_pt={}, packet_ssrc={}", destination_key, output_ssrc, packet.header.payload_type, packet.header.ssrc);
                             }
                             if let Err(error) = output.write_rtp(packet).await {
                                 eprintln!("  write_rtp ERROR for {}: {}", destination_key, error);
@@ -534,15 +499,6 @@ impl WebRtcAgent {
         let sender = destination
             .add_track(output.clone() as Arc<dyn TrackLocal>)
             .await?;
-        eprintln!("  add_track succeeded for {} kind={:?}, sender={:?}", relay_key, kind, sender.id());
-        let senders = destination.get_senders().await;
-        eprintln!("  destination {} now has {} senders", destination_key, senders.len());
-        for s in &senders {
-            let track = s.track();
-            let track_id = track.track_id().await;
-            let track_ssrc = s.get_parameters().await.unwrap().encodings.first().map(|e| e.rtp_coding_parameters.ssrc).flatten().unwrap_or_default();
-            eprintln!("    sender: track_id={}, track_ssrc={:?}", track_id, track_ssrc);
-        }
         self.relays.lock().await.insert(
             relay_key,
             RelayTrack {
@@ -644,15 +600,11 @@ impl WebRtcAgent {
         pc: &Arc<dyn PeerConnection>,
     ) -> Result<(), webrtc::error::Error> {
         let has_local_offer = self.local_offers.lock().await.contains(key);
-        eprintln!("  request_renegotiation_locked: key={}, local_offers={:?}", key, has_local_offer);
         if has_local_offer {
             let mut queued = self.queued_negotiations.lock().await;
             *queued.entry(key.to_owned()).or_insert(0) += 1;
-            let count = queued.get(key).copied();
-            eprintln!("  request_renegotiation_locked: queued, new count={:?}", count);
             return Ok(());
         }
-        eprintln!("  request_renegotiation_locked: sending offer");
         self.send_offer(key, room, peer_id, pc).await
     }
 
@@ -887,8 +839,8 @@ mod tests {
         }
 
         async fn on_track(&self, track: Arc<dyn TrackRemote>) {
-            let _ = self.track_tx.send(track);
-        }
+        let _ = self.track_tx.send(track);
+    }
     }
 
     struct TestPeer {
@@ -1027,24 +979,6 @@ mod tests {
             .set_remote_description(RTCSessionDescription::answer(answer.sdp).unwrap())
             .await
             .unwrap();
-
-        // Debug: print transceivers after initial negotiation
-        let transceivers = connection.get_transceivers().await;
-        eprintln!("  test peer {}: after initial negotiation, {} transceivers", id, transceivers.len());
-        for (i, t) in transceivers.iter().enumerate() {
-            let direction = t.direction().await;
-            let mid = t.mid().await.unwrap_or_default();
-            let sender = match t.sender().await {
-                Ok(Some(s)) => s,
-                Ok(None) | Err(_) => continue,
-            };
-            let sender_track = sender.track().track_id().await;
-            let _receiver = match t.receiver().await {
-                Ok(Some(r)) => r,
-                Ok(None) | Err(_) => continue,
-            };
-            eprintln!("    transceiver {}: mid={:?}, direction={:?}, sender_track={:?}", i, mid, direction, sender_track);
-        }
 
         let browser_agent = agent.clone();
         let browser_room = room.to_owned();
@@ -1806,6 +1740,16 @@ mod tests {
         let audio_track = create_audio_track(audio_ssrc);
         let video_track = create_video_track(video_ssrc);
 
+        // Add local tracks FIRST so they create sendrecv transceivers in the initial offer
+        connection
+            .add_track(audio_track.clone() as Arc<dyn TrackLocal>)
+            .await
+            .unwrap();
+        connection
+            .add_track(video_track.clone() as Arc<dyn TrackLocal>)
+            .await
+            .unwrap();
+
         // Add recvonly transceivers for receiving from up to 3 other peers
         // We create 3 per kind (one for each other peer)
         for _ in 0..3 {
@@ -1835,7 +1779,7 @@ mod tests {
         let (offer_tx, mut offer_rx) = mpsc::unbounded_channel();
         agent.register_peer(room, id, server_signal_tx).await;
 
-        // Initial offer with only recvonly transceivers
+        // Initial offer includes local tracks (sendrecv) + recvonly for other peers
         let offer = connection.create_offer(None).await.unwrap();
         connection
             .set_local_description(offer.clone())
@@ -1868,74 +1812,6 @@ mod tests {
             .set_remote_description(RTCSessionDescription::answer(answer.sdp).unwrap())
             .await
             .unwrap();
-
-        // Now add local tracks (will create new sendrecv transceivers)
-        connection
-            .add_track(audio_track.clone() as Arc<dyn TrackLocal>)
-            .await
-            .unwrap();
-        connection
-            .add_track(video_track.clone() as Arc<dyn TrackLocal>)
-            .await
-            .unwrap();
-
-        // Create and send offer for local tracks
-        let offer = connection.create_offer(None).await.unwrap();
-        connection
-            .set_local_description(offer.clone())
-            .await
-            .unwrap();
-        agent
-            .process_signal(
-                &SignalMessage {
-                    kind: "offer".to_owned(),
-                    room: room.to_owned(),
-                    peer_id: id.to_owned(),
-                    from: id.to_owned(),
-                    to: "server".to_owned(),
-                    display_name: String::new(),
-                    role: String::new(),
-                    muted: false,
-                    camera_on: false,
-                    screen_share: false,
-                    sdp: offer.sdp,
-                    candidate: None,
-                    participants: Vec::new(),
-                },
-                room,
-                id,
-            )
-            .await
-            .unwrap()
-            .unwrap();
-
-        // Wait for answer
-        let answer: SignalMessage = timeout(Duration::from_secs(10), offer_rx.recv())
-            .await
-            .expect("timed out waiting for server answer for local tracks")
-            .expect("server offer channel closed");
-        connection
-            .set_remote_description(RTCSessionDescription::answer(answer.sdp).unwrap())
-            .await
-            .unwrap();
-
-        // Debug: print transceivers after initial negotiation
-        let transceivers = connection.get_transceivers().await;
-        eprintln!("  test peer {}: after initial negotiation, {} transceivers", id, transceivers.len());
-        for (i, t) in transceivers.iter().enumerate() {
-            let direction = t.direction().await;
-            let mid = t.mid().await.unwrap_or_default();
-            let sender = match t.sender().await {
-                Ok(Some(s)) => s,
-                Ok(None) | Err(_) => continue,
-            };
-            let sender_track = sender.track().track_id().await;
-            let _receiver = match t.receiver().await {
-                Ok(Some(r)) => r,
-                Ok(None) | Err(_) => continue,
-            };
-            eprintln!("    transceiver {}: mid={:?}, direction={:?}, sender_track={:?}", i, mid, direction, sender_track);
-        }
 
         let browser_agent = agent.clone();
         let browser_room = room.to_owned();
@@ -1998,20 +1874,20 @@ mod tests {
         let peer_id = id.to_owned();
         tokio::spawn(async move {
             while let Some(track) = track_rx.recv().await {
-                eprintln!("  test peer {}: received track kind={:?}, id={}, ssrcs={:?}", peer_id, track.kind().await, track.track_id().await, track.ssrcs().await);
-                let mut packet_count = 0u64;
-                while let Some(event) = track.poll().await {
-                    if let TrackRemoteEvent::OnRtpPacket(packet) = event {
-                        packet_count += 1;
-                        if packet_count % 1000 == 1 {
-                            eprintln!("  test peer {}: track {} packet_count={}, pt={}, ssrc={}", peer_id, track.track_id().await, packet_count, packet.header.payload_type, packet.header.ssrc);
-                        }
-                        if packet_tx.send(packet).is_err() {
-                            return;
+                let track_id = track.track_id().await;
+                let peer_id = peer_id.clone();
+                let packet_tx = packet_tx.clone();
+                tokio::spawn(async move {
+                    let mut packet_count = 0u64;
+                    while let Some(event) = track.poll().await {
+                        if let TrackRemoteEvent::OnRtpPacket(packet) = event {
+                            packet_count += 1;
+                            if packet_tx.send(packet).is_err() {
+                                return;
+                            }
                         }
                     }
-                }
-                eprintln!("  test peer {}: track {} ended, total packets={}", peer_id, track.track_id().await, packet_count);
+                });
             }
         });
 
@@ -2129,19 +2005,11 @@ mod tests {
             })
             .collect();
 
-        // Give time for ready_peers to be fully populated
-        sleep(Duration::from_millis(200)).await;
-
         // Wait for all tracks to be published
         timeout(Duration::from_secs(30), async {
             loop {
                 let published_tracks = agent.published_tracks.lock().await;
                 let published_count = published_tracks.len();
-                let connections_count = agent.connections.lock().await.len();
-                let ready_count = agent.ready_peers.lock().await.len();
-                eprintln!("published_tracks: {}, connections: {}, ready_peers: {}, keys: {:?}",
-                    published_count, connections_count, ready_count,
-                    published_tracks.keys().collect::<Vec<_>>());
                 if published_count >= 8 {
                     // 4 peers * 2 tracks each
                     break;
@@ -2167,7 +2035,6 @@ mod tests {
                             .await
                             .unwrap();
                         let answer = peer.connection.create_answer(None).await.unwrap();
-                        eprintln!("Answer {} for peer {}:\n{}", offer_count, peer.id, answer.sdp);
                         peer.connection
                             .set_local_description(answer.clone())
                             .await
@@ -2194,27 +2061,16 @@ mod tests {
                             )
                             .await
                             .unwrap();
-                        eprintln!("Answered offer {} for peer {}", offer_count, peer.id);
                     }
                     Ok(None) => {
-                        eprintln!("Offer channel closed for peer {}", peer.id);
                         break;
                     }
                     Err(_) => {
-                        eprintln!("No more offers for peer {} after {} offers", peer.id, offer_count);
                         break;
                     }
                 }
             }
         }
-
-        // Debug: print relays
-        let relays = agent.relays.lock().await;
-        eprintln!("Total relays: {}", relays.len());
-        for (key, relay) in relays.iter() {
-            eprintln!("  Relay: {} -> dest: {}", key, relay.destination_peer_key);
-        }
-        drop(relays);
 
         // Verify each peer receives audio and video from all 3 other peers
         for peer in peers.iter_mut() {
@@ -2232,7 +2088,6 @@ mod tests {
                     video_received += 1;
                 }
             }
-            eprintln!("Peer {} received: audio={}, video={}", peer.id, audio_received, video_received);
             // Each peer should receive from 3 other peers
             // With 50 packets/sec for 10 seconds = 500 packets per track
             // 3 peers * 500 = 1500 packets per media type
