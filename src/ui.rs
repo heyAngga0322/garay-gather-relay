@@ -856,12 +856,6 @@ pub const INDEX_HTML: &str = r###"
                 } else {
                     setStatus(meetingStatus, 'Signaling connected. Joining media...');
                 }
-                if (peerConnection && peerConnection.signalingState === 'stable') {
-                    const offer = peerConnection.createOffer();
-                    peerConnection.setLocalDescription(offer).then(() => {
-                        sendSignal({ type: 'offer', sdp: offer.sdp });
-                    }).catch(() => {});
-                }
             });
             activeSocket.addEventListener('message', (event) => {
                 if (socket !== activeSocket) return;

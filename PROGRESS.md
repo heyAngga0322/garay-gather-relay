@@ -203,3 +203,34 @@ Changed `MAX_PEERS_PER_ROOM` from 2 to 4 at the user's request. The default-capa
 This changes the configured admission limit only. It does not establish four participants as a load-validated supported capacity: existing RTP measurements use a short single-publisher workload, and the optimized four-participant, all-publishers acceptance workload remains outstanding. The default should be revisited if that acceptance workload fails.
 
 Validation after the change: `cargo fmt --check`, `cargo check`, and `cargo test --quiet` passed (18 passed, 0 failed, 2 ignored). `npm run test:browser -- --reporter=list` also passed all 4 Chromium tests with the suite's explicit capacity override of 3. The default-admission test verifies four peers are admitted and a fifth is rejected.
+
+# Progress Report: November 13, 2026
+
+## Friday acceptance review and project audit
+
+Executed the Friday acceptance checklist against the current workspace and recorded the evidence in the project state today.
+
+### Verified current behavior
+
+- `cargo fmt --check` passed.
+- `cargo check` passed.
+- `cargo test --quiet` passed: 18 passed, 0 failed, 2 ignored.
+- `npm ci` completed successfully.
+- `npm run test:browser -- --reporter=list` passed: 7 browser tests, 0 failed.
+
+The browser suite currently exercises the key guest-meeting flow implemented in the sprint: room creation and join, roster changes, local preview plus remote media tiles, media-state updates, pin/layout behavior, reconnect with a fresh ticket, permission-denial fallback states, screen sharing and device controls, and keyboard-accessible controls with status announcements.
+
+### What remains explicitly unproven
+
+The following November 13 checklist items are still not complete from a capacity and production-readiness perspective, despite the successful smoke coverage:
+
+- [ ] Run the optimized four-participant all-publishers acceptance workload in a release-optimized build and verify CPU, memory, packet delivery, and cleanup at the documented room capacity.
+- [ ] Validate the configured default capacity of 4 under a representative multi-peer workload; the current short RTP benchmark and the default-capacity admission test do not yet establish a supported production capacity.
+- [ ] Complete the remaining production-readiness and deployment items: TLS/TURN configuration, secure deployment guidance, ops runbooks, metrics, shutdown draining, and readiness/liveness checks.
+- [ ] Close the final sprint-report and release-gate items that require explicit evidence beyond the local browser and Rust smoke tests.
+
+### Conclusion
+
+The project is in a verified guest-meeting MVP state for the implemented flow, with the current Rust and browser checks passing in this workspace. The local evidence supports the Thursday and Friday smoke-acceptance slice, but it does not yet support a claim that the November 13 acceptance workload is fully complete or that the default room capacity of 4 is production-validated.
+
+The honest status is: the current codebase is working and covered by the implemented tests, but the final optimized four-participant acceptance proof and capacity validation remain the release-blocking items for the sprint closeout.

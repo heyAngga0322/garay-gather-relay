@@ -2,9 +2,23 @@
 
 ## Project Overview
 
-`Garay` (Gather Relay) is a Rust WebRTC meeting prototype. It serves an embedded browser UI over HTTP and relays WebRTC signaling messages over room-scoped WebSockets. The browser uses the native `RTCPeerConnection` API for media connections.
+`Garay` (Gather Relay) is a Rust WebRTC meeting prototype that now includes a guest-meeting flow, room admission, role-aware moderation, and browser-based media negotiation. The project is designed as a small-group meeting app rather than a simple signaling demo.
 
-The server also creates a server-side `webrtc` crate `PeerConnection` for each connected room/peer pair. This currently provides signaling-side SDP/ICE processing and connection lifecycle management; browser media is not routed through the Rust server.
+The server owns room membership, ticket-based admission, and the canonical peer identity for each socket. Browsers still negotiate media peer-to-peer using native `RTCPeerConnection`, while the server manages signaling and room state. The Rust-side `webrtc` peer connection objects are used for SDP/ICE handling and connection lifecycle management, not for media forwarding.
+
+## Current Product Reality
+
+This project is a verified guest-meeting MVP slice, not a production-ready public deployment. It supports:
+
+- room creation and guest invitation flow
+- short-lived single-use join tickets
+- host/guest role binding on sockets
+- lobby and room-lock behavior
+- server-side roster updates and state broadcast
+- screen sharing, device switching, reconnect recovery, and peer rebuild logic
+- browser automation coverage for the core meeting flow
+
+The remaining gaps are still explicit: optimized four-participant capacity validation, release-level deployment hardening, and full production-readiness documentation.
 
 ## Technology
 
@@ -13,13 +27,15 @@ The server also creates a server-side `webrtc` crate `PeerConnection` for each c
 - Axum 0.8 with WebSocket support
 - `webrtc` 0.20.5
 - Serde and Serde JSON for signaling payloads
-- `futures-util` for WebSocket stream/sink handling
+- `futures-util` for WebSocket stream and sink handling
+- Playwright browser tests for UI and migration flow validation
 
 ## Commands
 
 Run from the repository root:
 
 ```sh
+cargo fmt --check
 cargo check
 cargo test
 cargo run
@@ -39,65 +55,153 @@ Expected response:
 {"service":"webrtc-signal-server","status":"ok"}
 ```
 
-If a previous development process owns port 3000, identify or stop it before restarting. Avoid changing the port unless the task specifically requires configurable binding.
+The browser tests use the project’s local Playwright setup:
 
-## Source Layout
+```sh
+npm ci
+npx playwright install chromium
+npm run test:browser -- --reporter=list
+```
 
-- `src/main.rs`: Tokio entrypoint; delegates startup to `app::start_server()`.
-- `src/app.rs`: Axum routes, shared application state, room membership, WebSocket lifecycle, targeted message forwarding, and cleanup.
-- `src/signaling.rs`: Serde models for signaling messages, ICE candidates, and the `room` query parameter. Contains the signaling parsing test.
-- `src/ui.rs`: Embedded HTML/CSS/JavaScript served at `/`. Contains the browser camera/microphone UI and native `RTCPeerConnection` negotiation.
-- `src/webrtc.rs`: Server-side `webrtc` crate integration. Stores peer connections by `room_id:peer_id`, applies incoming SDP/ICE, and removes connections when sockets close.
+If a previous development process owns port 3000, identify or stop it before restarting.
+
+## Architecture
+
+### Overview
+
+The system has two main planes:
+
+- **Signaling plane:** browsers and server exchange JSON messages over WebSockets; the server owns room membership and routing decisions.
+- **Media plane:** browser `RTCPeerConnection`s exchange audio/video directly; the Rust process does not decode or forward media.
+
+The server-side `webrtc` peer connections still matter because they encode and apply incoming SDP/ICE for each room/peer relationship, track lifecycle, and time out stale connection state.
+
+```text
+Browser A ── WS /ws?room=R&ticket=T ──┐        ┌── WS /ws?room=R&ticket=T ── Browser B
+                                      │
+                                      ▼
+                              app.rs (meeting, room, auth, routing)
+                                      │
+                                      ▼
+                  webrtc.rs (server-side PeerConnection per room:peer)
+
+Browser A ◄══════ direct WebRTC media (browser to browser) ═══════► Browser B
+```
+
+### Module Responsibilities
+
+- `src/main.rs`: Tokio entrypoint; launches the Axum app.
+- `src/app.rs`: meeting creation, guest ticket handling, room membership, server-side identity, origin checks, moderation, and WebSocket lifecycle.
+- `src/signaling.rs`: signaling wire format, room validation, ICE candidate support, and participant-state schemas.
+- `src/ui.rs`: embedded meeting browser UI, create/join view, room controls, media negotiation, and recovery logic.
+- `src/webrtc.rs`: server-side WebRTC peer storage, SDP/ICE processing, publication relay, and teardown cleanup.
+
+### Current Meeting Lifecycle
+
+1. A browser opens the app at `/` and enters a display name.
+2. The user creates a room or joins via a room code or invite URL.
+3. The server issues a host ticket for the creator or a single-use guest ticket for invited users.
+4. The browser connects to `/ws?room=<room>&ticket=<ticket>`.
+5. The server authenticates the ticket, binds the socket to the canonical room and role, and issues a `welcome` event with the assigned peer ID.
+6. Existing room members and the new participant are synchronized through roster updates.
+7. Offers, answers, and ICE candidates are routed only to the intended target peer.
+8. On disconnect, the server removes the participant and cleans up peer state and relay entries.
+
+### Invariants
+
+- The server owns and overwrites `room`, `peer_id`, and `from` values from the socket context.
+- Client-generated IDs are never trusted for routing.
+- SDP and ICE are targeted with `to`; they are never broadcast to the whole room.
+- Every room admission path enforces the configured room capacity.
+- Meeting state and tickets are server-side and in-memory for the MVP.
+
+## Security and Admission Model
+
+This is still a prototype-grade security model, but it is stronger than the original demo and is intentionally audited in the sprint plan.
+
+### Trusted versus untrusted data
+
+- **Untrusted:** all client-provided fields in WebSocket JSON, any room identifiers, any role or identity claims, SDP, and ICE data.
+- **Trusted:** the server-owned association between a socket and `(room_id, peer_id, role)` after authentication and admission.
+
+### Current protections
+
+- Single-use join tickets with role, room, expiry, and nonce data
+- Ticket consumption tracking to prevent replay
+- Host-only actions enforced at the server
+- Origin allowlisting for browser-facing WebSocket upgrades
+- Room cap enforcement with `MAX_PEERS_PER_ROOM`
+- Message payload and state limits for display names and signaling state
+- Bounded outbound socket queues and signaling-rate protections
+- Targeted forwarding so SDP/ICE do not reach unrelated peers
+
+### Known gaps and limitations
+
+- This is not a public-production deployment and is not hardened for hostile internet exposure.
+- TLS and `wss://` are not yet configured.
+- TURN configuration is not yet production-ready for restrictive NAT/firewall environments.
+- The default `MAX_PEERS_PER_ROOM = 4` is configured, but it is not yet a load-validated supported capacity claim.
+- The current architecture still depends on in-memory state and is not a persistent multi-tenant service.
+- Authentication is intentionally not a full user account system; join tickets are short-lived meeting credentials only.
 
 ## HTTP and WebSocket API
 
-Routes:
+### Routes
 
-- `GET /`: serves the embedded `INDEX_HTML` from `src/ui.rs`.
-- `GET /health`: returns service status JSON.
-- `GET /ws?room=<room-id>`: upgrades to a WebSocket. If `room` is omitted, the room defaults to `demo-room`.
+- `GET /`: serves the embedded meeting UI
+- `GET /health`: returns server health JSON
+- `POST /api/meeting`: creates a room and returns a host ticket and invite URL
+- `POST /api/meeting/:room/ticket`: issues a guest join ticket
+- `GET /ws?room=<room>&ticket=<ticket>`: upgrades a socket after ticket validation
 
-`SignalMessage` is serialized with `type` as the JSON field for its Rust `kind` field. Common fields are:
+### Message model
 
-- `type`: `welcome`, `peer-joined`, `offer`, `answer`, or `candidate`.
-- `room`: server-normalized room ID.
-- `peer_id`: server-assigned sender ID.
-- `from`: server-normalized sender ID.
-- `to`: target peer ID; an empty value means room broadcast for notifications.
-- `sdp`: SDP text for offers and answers.
-- `candidate`: optional ICE candidate object.
+`SignalMessage` is the main JSON payload. Important fields include:
 
-ICE JSON accepts browser field names `sdpMid` and `sdpMLineIndex` through Serde aliases.
+- `type`: `welcome`, `peer-joined`, `peer-left`, `offer`, `answer`, `candidate`, `relay-error`, and related room-state updates
+- `room`: server-normalized room ID
+- `peer_id`: server-assigned sender ID
+- `from`: sender ID as tracked by the server
+- `to`: target peer ID; `""` means broadcast to the room for notifications
+- `sdp`: SDP payload for offer/answer exchange
+- `candidate`: ICE candidate payload
 
-The server always overwrites incoming `room`, `peer_id`, and `from` values with the values associated with the WebSocket. Do not trust client-provided identity fields for routing.
+The server overwrites any client-supplied `room`, `peer_id`, or `from` values before routing. The browser cannot control server-side identity or room membership through untrusted fields.
 
 ## Browser Negotiation Flow
 
-1. A browser connects to `/ws?room=demo-room`.
-2. The server sends `welcome` with the canonical peer ID.
-3. The server sends `peer-joined` notifications to existing and newly connected peers.
-4. The browser with the lexicographically smaller peer ID initiates the offer.
-5. The other browser applies the offer, creates an answer, and sends it to the offerer.
-6. Both browsers exchange ICE candidates targeted with `to`.
-7. Local camera and microphone tracks are added to the browser `RTCPeerConnection`; remote tracks are displayed in the remote video element.
+1. The user creates or joins a room through the embedded UI.
+2. The browser connects to the WebSocket using a valid room and ticket.
+3. The server sends `welcome` with the canonical peer ID and state snapshot metadata.
+4. Room members receive `peer-joined` or roster updates when participants arrive or leave.
+5. The browser with the smaller peer ID starts the offer.
+6. The other browser creates and returns an answer.
+7. ICE candidates are exchanged with `to` targeting the peer.
+8. Local camera/microphone/screen-share tracks are added to the browser `RTCPeerConnection` and remote tracks are displayed in the meeting UI.
 
-The microphone toggle is an icon overlay on the local video. The camera toggle remains in the action row. Both controls update their icon, color, tooltip, and `aria-pressed` state from the corresponding `MediaStreamTrack.enabled` value.
+The browser UI also supports toggling microphone/camera, screen-share transitions, reconnect recovery, layout changes, and pinning without stopping media negotiation.
 
 ## Implementation Guidelines
 
-- Preserve the existing module boundaries. Put routing and room lifecycle changes in `app.rs`, wire-format changes in `signaling.rs`, browser behavior in `ui.rs`, and server-side WebRTC changes in `webrtc.rs`.
-- Match the installed `webrtc` 0.20.5 API. Inspect dependency sources when an API is unclear instead of assuming examples from another crate version.
-- Keep signaling targeted with `to` whenever a message belongs to one peer. Do not broadcast SDP or ICE to every room member.
-- Keep server identity authoritative. Browser-generated IDs must not be used for routing.
-- When changing `SignalMessage`, update both Rust serialization/deserialization and the JavaScript payloads together.
-- Run `cargo fmt --check`, `cargo check`, and `cargo test` after Rust changes. At minimum, run `cargo check` after changes limited to the embedded UI.
+- Keep routing and room-state logic in `app.rs`.
+- Keep signaling wire types in `signaling.rs`.
+- Keep browser logic in `ui.rs`.
+- Keep server-side peer connection and relay behavior in `webrtc.rs`.
+- Match the installed `webrtc` 0.20.5 API carefully; do not assume behavior from older examples.
+- Keep SDP/ICE targeted with `to` whenever the message belongs to one peer.
+- Update both the Rust signal model and browser payload serialization together when a signaling shape changes.
+- Run `cargo fmt --check`, `cargo check`, and `cargo test` after Rust changes.
 - Do not commit build artifacts from `target/`.
 
 ## Known Limitations
 
-- The demo UI uses the fixed room `demo-room`; there is no room picker.
-- The server binds only to port 3000 and has no configuration layer.
-- There is no authentication, authorization, room capacity limit, or origin validation.
-- The Rust-side `PeerConnection` is not yet a media forwarding server. Browser media is exchanged directly through browser WebRTC.
-- End-to-end negotiation requires two browser tabs/windows, camera and microphone permissions, and a browser environment that supports `getUserMedia` and `RTCPeerConnection`.
-- The current ICE configuration relies on Google's public STUN server and may need TURN support for restrictive networks.
+- The project is still local-development oriented and not a public-facing production deployment.
+- The current default room capacity is 4, but it has not been validated as a supported production capacity under repeated four-participant load.
+- The UI is embedded and local to the project; it does not yet provide a full multi-tenant or externally hosted deployment story.
+- Browser media still depends on device permissions and the configured STUN path.
+- Real production reliability requires TLS/TURN, deployment configuration, and deeper operations tooling.
+- Meeting history, scheduling, captions, recording, and user-account features remain outside this MVP scope.
+
+## Current Status Summary
+
+The app is in a verified guest-meeting MVP state for the current offline/local smoke flow, with working Rust and browser automation coverage for the implemented features. The remaining work is primarily capacity validation, operational hardening, and production-readiness documentation rather than a blank-slate feature gap.

@@ -35,7 +35,7 @@ pub struct WebRtcAgent {
     ready_peers: Arc<Mutex<HashSet<String>>>,
     negotiation_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     local_offers: Arc<Mutex<HashSet<String>>>,
-    queued_negotiations: Arc<Mutex<HashSet<String>>>,
+    queued_negotiations: Arc<Mutex<HashMap<String, u32>>>,
     relay_lifecycle_lock: Arc<Mutex<()>>,
     udp_addrs: Arc<Vec<String>>,
 }
@@ -177,14 +177,36 @@ impl WebRtcAgent {
                 }
                 pc.set_remote_description(RTCSessionDescription::offer(signal.sdp.clone())?)
                     .await?;
-                let added_existing_tracks = self.add_existing_tracks(&key, room).await?;
+
+            // Debug: print transceivers after setting remote description
+            let transceivers = pc.get_transceivers().await;
+            eprintln!("  DEBUG: after set_remote_description for {key}, transceivers:");
+            for (i, t) in transceivers.iter().enumerate() {
+                let direction = t.direction().await;
+                let mid = t.mid().await.unwrap_or_default();
+                let sender = match t.sender().await {
+                    Ok(Some(s)) => s,
+                    Ok(None) | Err(_) => continue,
+                };
+                let sender_track = sender.track().track_id().await;
+                eprintln!("    transceiver {}: mid={:?}, direction={:?}, sender_track={:?}", i, mid, direction, sender_track);
+            }
+
+            let added_existing_tracks = self.add_existing_tracks(&key, room).await?;
                 let answer = pc.create_answer(None).await?;
                 pc.set_local_description(answer.clone()).await?;
                 self.ready_peers.lock().await.insert(key.clone());
                 if added_existing_tracks {
-                    self.queued_negotiations.lock().await.insert(key);
+                    let mut queued = self.queued_negotiations.lock().await;
+                    *queued.entry(key.clone()).or_insert(0) += 1;
                 } else {
-                    self.queued_negotiations.lock().await.remove(&key);
+                    let mut queued = self.queued_negotiations.lock().await;
+                    if let Some(count) = queued.get_mut(&key) {
+                        *count -= 1;
+                        if *count == 0 {
+                            queued.remove(&key);
+                        }
+                    }
                 }
                 Ok(Some(SignalMessage {
                     kind: "answer".to_owned(),
@@ -207,8 +229,22 @@ impl WebRtcAgent {
                 pc.set_remote_description(RTCSessionDescription::answer(signal.sdp.clone())?)
                     .await?;
                 let had_local_offer = self.local_offers.lock().await.remove(&key);
-                if had_local_offer && self.queued_negotiations.lock().await.remove(&key) {
-                    self.send_offer(&key, room, peer_id, &pc).await?;
+                if had_local_offer {
+                    let mut send_next = false;
+                    {
+                        let mut queued = self.queued_negotiations.lock().await;
+                        if let Some(count) = queued.get_mut(&key) {
+                            *count -= 1;
+                            if *count == 0 {
+                                queued.remove(&key);
+                            } else {
+                                send_next = true;
+                            }
+                        }
+                    }
+                    if send_next {
+                        self.send_offer(&key, room, peer_id, &pc).await?;
+                    }
                 }
                 Ok(None)
             }
@@ -239,9 +275,16 @@ impl WebRtcAgent {
         let key = self.key(room, peer_id);
         let negotiation_lock = self.negotiation_lock(&key).await;
         let _negotiation_guard = negotiation_lock.lock().await;
-        if !self.queued_negotiations.lock().await.remove(&key) {
+        let mut queued = self.queued_negotiations.lock().await;
+        if let Some(count) = queued.get_mut(&key) {
+            *count -= 1;
+            if *count == 0 {
+                queued.remove(&key);
+            }
+        } else {
             return Ok(());
         }
+        drop(queued);
         let pc = self.get(&key).await?;
         self.send_offer(&key, room, peer_id, &pc).await
     }
@@ -293,6 +336,20 @@ impl WebRtcAgent {
             self.add_relay_track(&publication_key, &source_key, &destination_key, &source)
                 .await?;
 
+            // Debug: print transceivers after adding relay track
+            let transceivers = pc.get_transceivers().await;
+            eprintln!("  DEBUG: after add_relay_track for {publication_key} -> {destination_key}, transceivers:");
+            for (i, t) in transceivers.iter().enumerate() {
+                let direction = t.direction().await;
+                let mid = t.mid().await.unwrap_or_default();
+                let sender = match t.sender().await {
+                    Ok(Some(s)) => s,
+                    Ok(None) | Err(_) => continue,
+                };
+                let sender_track = sender.track().track_id().await;
+                eprintln!("    transceiver {}: mid={:?}, direction={:?}, sender_track={:?}", i, mid, direction, sender_track);
+            }
+
             let destination_peer = destination_key.split(':').nth(1).unwrap_or_default();
             self.request_renegotiation_locked(&destination_key, room, destination_peer, &pc)
                 .await?;
@@ -306,6 +363,7 @@ impl WebRtcAgent {
             .insert(publication_key.clone(), cancel_tx);
         tokio::spawn(async move {
             let mut failed_destinations = HashSet::new();
+            let mut packet_count = 0u64;
             loop {
                 tokio::select! {
                     _ = &mut cancel_rx => break,
@@ -324,6 +382,10 @@ impl WebRtcAgent {
                                 | TrackRemoteEvent::OnEnded,
                             ) | None => break,
                         };
+                        packet_count += 1;
+                        if packet_count % 1000 == 1 {
+                            eprintln!("relay_track {}: packet_count={}, pt={}, ssrc={}", publication_key, packet_count, packet.header.payload_type, packet.header.ssrc);
+                        }
                         let outputs: Vec<_> = agent
                             .relays
                             .lock()
@@ -341,10 +403,15 @@ impl WebRtcAgent {
                             .collect();
                         for (destination_key, output) in outputs {
                             let mut packet = packet.clone();
-                            if let Some(ssrc) = output.ssrcs().await.first().copied() {
+                            let output_ssrc = output.ssrcs().await.first().copied();
+                            if let Some(ssrc) = output_ssrc {
                                 packet.header.ssrc = ssrc;
                             }
+                            if packet_count % 1000 == 1 {
+                                eprintln!("  forwarding to {}: output_ssrc={:?}, packet_pt={}, packet_ssrc={}", destination_key, output_ssrc, packet.header.payload_type, packet.header.ssrc);
+                            }
                             if let Err(error) = output.write_rtp(packet).await {
+                                eprintln!("  write_rtp ERROR for {}: {}", destination_key, error);
                                 if failed_destinations.insert(destination_key.clone()) {
                                     agent
                                         .notify_peer_relay_error(
@@ -410,14 +477,19 @@ impl WebRtcAgent {
         }
 
         let kind = source.kind().await;
+        eprintln!("add_relay_track: kind={:?}, publication_key={}", kind, publication_key);
         let mut codec = None;
         for ssrc in source.ssrcs().await {
             if let Some(value) = source.codec(ssrc).await {
+                eprintln!("  source codec for ssrc={}: mime_type={}, clock_rate={}, channels={}", ssrc, value.mime_type, value.clock_rate, value.channels);
                 codec = Some(value);
                 break;
             }
         }
-        let Some(codec) = codec else { return Ok(false) };
+        let Some(codec) = codec else {
+            eprintln!("  no codec found for source track");
+            return Ok(false)
+        };
         let destination = self.get(destination_key).await?;
         let remote_sdp = destination
             .remote_description()
@@ -462,6 +534,15 @@ impl WebRtcAgent {
         let sender = destination
             .add_track(output.clone() as Arc<dyn TrackLocal>)
             .await?;
+        eprintln!("  add_track succeeded for {} kind={:?}, sender={:?}", relay_key, kind, sender.id());
+        let senders = destination.get_senders().await;
+        eprintln!("  destination {} now has {} senders", destination_key, senders.len());
+        for s in &senders {
+            let track = s.track();
+            let track_id = track.track_id().await;
+            let track_ssrc = s.get_parameters().await.unwrap().encodings.first().map(|e| e.rtp_coding_parameters.ssrc).flatten().unwrap_or_default();
+            eprintln!("    sender: track_id={}, track_ssrc={:?}", track_id, track_ssrc);
+        }
         self.relays.lock().await.insert(
             relay_key,
             RelayTrack {
@@ -562,10 +643,16 @@ impl WebRtcAgent {
         peer_id: &str,
         pc: &Arc<dyn PeerConnection>,
     ) -> Result<(), webrtc::error::Error> {
-        if self.local_offers.lock().await.contains(key) {
-            self.queued_negotiations.lock().await.insert(key.to_owned());
+        let has_local_offer = self.local_offers.lock().await.contains(key);
+        eprintln!("  request_renegotiation_locked: key={}, local_offers={:?}", key, has_local_offer);
+        if has_local_offer {
+            let mut queued = self.queued_negotiations.lock().await;
+            *queued.entry(key.to_owned()).or_insert(0) += 1;
+            let count = queued.get(key).copied();
+            eprintln!("  request_renegotiation_locked: queued, new count={:?}", count);
             return Ok(());
         }
+        eprintln!("  request_renegotiation_locked: sending offer");
         self.send_offer(key, room, peer_id, pc).await
     }
 
@@ -760,6 +847,7 @@ mod tests {
         time::{Duration, sleep, timeout},
     };
     use webrtc::media_stream::{
+        Track,
         track_local::{TrackLocal, static_rtp::TrackLocalStaticRTP},
         track_remote::{TrackRemote, TrackRemoteEvent},
     };
@@ -812,7 +900,7 @@ mod tests {
         forwarding_tasks: Vec<JoinHandle<()>>,
     }
 
-    fn create_video_track() -> Arc<TrackLocalStaticRTP> {
+    fn create_video_track(ssrc: u32) -> Arc<TrackLocalStaticRTP> {
         Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
             "test-stream".to_owned(),
             "test-video".to_owned(),
@@ -820,7 +908,7 @@ mod tests {
             RtpCodecKind::Video,
             vec![RTCRtpEncodingParameters {
                 rtp_coding_parameters: RTCRtpCodingParameters {
-                    ssrc: Some(1234),
+                    ssrc: Some(ssrc),
                     ..Default::default()
                 },
                 active: true,
@@ -828,6 +916,30 @@ mod tests {
                     mime_type: "video/VP8".to_owned(),
                     clock_rate: 90_000,
                     channels: 0,
+                    sdp_fmtp_line: String::new(),
+                    rtcp_feedback: Vec::new(),
+                },
+                ..Default::default()
+            }],
+        )))
+    }
+
+    fn create_audio_track(ssrc: u32) -> Arc<TrackLocalStaticRTP> {
+        Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+            "test-stream".to_owned(),
+            "test-audio".to_owned(),
+            "loopback-audio".to_owned(),
+            RtpCodecKind::Audio,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    ssrc: Some(ssrc),
+                    ..Default::default()
+                },
+                active: true,
+                codec: RTCRtpCodec {
+                    mime_type: "audio/opus".to_owned(),
+                    clock_rate: 48_000,
+                    channels: 2,
                     sdp_fmtp_line: String::new(),
                     rtcp_feedback: Vec::new(),
                 },
@@ -881,7 +993,7 @@ mod tests {
         }
 
         let (server_signal_tx, mut server_signal_rx) = mpsc::unbounded_channel();
-        let (offer_tx, offer_rx) = mpsc::unbounded_channel();
+        let (offer_tx, mut offer_rx) = mpsc::unbounded_channel();
         agent.register_peer(room, id, server_signal_tx).await;
         let offer = connection.create_offer(None).await.unwrap();
         connection
@@ -915,6 +1027,24 @@ mod tests {
             .set_remote_description(RTCSessionDescription::answer(answer.sdp).unwrap())
             .await
             .unwrap();
+
+        // Debug: print transceivers after initial negotiation
+        let transceivers = connection.get_transceivers().await;
+        eprintln!("  test peer {}: after initial negotiation, {} transceivers", id, transceivers.len());
+        for (i, t) in transceivers.iter().enumerate() {
+            let direction = t.direction().await;
+            let mid = t.mid().await.unwrap_or_default();
+            let sender = match t.sender().await {
+                Ok(Some(s)) => s,
+                Ok(None) | Err(_) => continue,
+            };
+            let sender_track = sender.track().track_id().await;
+            let _receiver = match t.receiver().await {
+                Ok(Some(r)) => r,
+                Ok(None) | Err(_) => continue,
+            };
+            eprintln!("    transceiver {}: mid={:?}, direction={:?}, sender_track={:?}", i, mid, direction, sender_track);
+        }
 
         let browser_agent = agent.clone();
         let browser_room = room.to_owned();
@@ -997,10 +1127,12 @@ mod tests {
     }
 
     async fn answer_server_offer(agent: &WebRtcAgent, room: &str, peer: &mut TestPeer) {
+        eprintln!("  answer_server_offer: waiting for offer for peer {}", peer.id);
         let offer = timeout(Duration::from_secs(10), peer.offer_rx.recv())
             .await
             .expect("timed out waiting for server renegotiation offer")
             .expect("server offer channel closed");
+        eprintln!("  answer_server_offer: received offer for peer {}", peer.id);
         peer.connection
             .set_remote_description(RTCSessionDescription::offer(offer.sdp).unwrap())
             .await
@@ -1142,7 +1274,7 @@ mod tests {
         let started = Instant::now();
         let agent = WebRtcAgent::with_udp_addrs(vec!["127.0.0.1:0".to_owned()]);
         let room = format!("resource-baseline-{participant_count}");
-        let source_track = create_video_track();
+        let source_track = create_video_track(1234);
         let mut peers =
             vec![connect_test_peer(&agent, &room, "a", Some(source_track.clone()), false).await];
         let mut peer_b = connect_test_peer(&agent, &room, "b", None, true).await;
@@ -1379,7 +1511,7 @@ mod tests {
     async fn three_peer_rtp_replay_and_publisher_cleanup() {
         let agent = WebRtcAgent::with_udp_addrs(vec!["127.0.0.1:0".to_owned()]);
         let room = "three-peer-rtp-room";
-        let source_track = create_video_track();
+        let source_track = create_video_track(1234);
         let mut peer_a =
             connect_test_peer(&agent, room, "a", Some(source_track.clone()), false).await;
         let mut peer_b = connect_test_peer(&agent, room, "b", None, true).await;
@@ -1529,7 +1661,7 @@ mod tests {
         audio_result.unwrap();
         video_result.unwrap();
         assert!(agent.local_offers.lock().await.contains(&key));
-        assert!(agent.queued_negotiations.lock().await.contains(&key));
+        assert!(agent.queued_negotiations.lock().await.contains_key(&key));
 
         let offer_message = next_signal_of_kind(&mut rx, "offer").await;
         browser
@@ -1631,5 +1763,521 @@ mod tests {
             .unwrap();
         agent.remove_peer("negotiation-room", "browser").await;
         browser.close().await.unwrap();
+    }
+
+    struct BidirectionalPeer {
+        id: String,
+        connection: Arc<dyn PeerConnection>,
+        offer_rx: mpsc::UnboundedReceiver<SignalMessage>,
+        packet_rx: mpsc::UnboundedReceiver<Packet>,
+        connected_rx: mpsc::UnboundedReceiver<()>,
+        forwarding_tasks: Vec<JoinHandle<()>>,
+        audio_track: Arc<TrackLocalStaticRTP>,
+        video_track: Arc<TrackLocalStaticRTP>,
+    }
+
+    async fn connect_bidirectional_peer(
+        agent: &WebRtcAgent,
+        room: &str,
+        id: &str,
+        audio_ssrc: u32,
+        video_ssrc: u32,
+    ) -> BidirectionalPeer {
+        let (candidate_tx, mut candidate_rx) = mpsc::unbounded_channel();
+        let (track_tx, mut track_rx) = mpsc::unbounded_channel();
+        let (connected_tx, connected_rx) = mpsc::unbounded_channel();
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs().unwrap();
+        let connection: Arc<dyn PeerConnection> = Arc::new(
+            PeerConnectionBuilder::new()
+                .with_media_engine(media_engine)
+                .with_handler(Arc::new(TestPeerHandler {
+                    candidate_tx,
+                    track_tx,
+                    connected_tx,
+                }))
+                .with_udp_addrs(vec!["127.0.0.1:0"])
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        // Create audio and video tracks
+        let audio_track = create_audio_track(audio_ssrc);
+        let video_track = create_video_track(video_ssrc);
+
+        // Add recvonly transceivers for receiving from up to 3 other peers
+        // We create 3 per kind (one for each other peer)
+        for _ in 0..3 {
+            connection
+                .add_transceiver_from_kind(
+                    RtpCodecKind::Audio,
+                    Some(RTCRtpTransceiverInit {
+                        direction: RTCRtpTransceiverDirection::Recvonly,
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .unwrap();
+            connection
+                .add_transceiver_from_kind(
+                    RtpCodecKind::Video,
+                    Some(RTCRtpTransceiverInit {
+                        direction: RTCRtpTransceiverDirection::Recvonly,
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+
+        let (server_signal_tx, mut server_signal_rx) = mpsc::unbounded_channel();
+        let (offer_tx, mut offer_rx) = mpsc::unbounded_channel();
+        agent.register_peer(room, id, server_signal_tx).await;
+
+        // Initial offer with only recvonly transceivers
+        let offer = connection.create_offer(None).await.unwrap();
+        connection
+            .set_local_description(offer.clone())
+            .await
+            .unwrap();
+        let answer = agent
+            .process_signal(
+                &SignalMessage {
+                    kind: "offer".to_owned(),
+                    room: room.to_owned(),
+                    peer_id: id.to_owned(),
+                    from: id.to_owned(),
+                    to: "server".to_owned(),
+                    display_name: String::new(),
+                    role: String::new(),
+                    muted: false,
+                    camera_on: false,
+                    screen_share: false,
+                    sdp: offer.sdp,
+                    candidate: None,
+                    participants: Vec::new(),
+                },
+                room,
+                id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        connection
+            .set_remote_description(RTCSessionDescription::answer(answer.sdp).unwrap())
+            .await
+            .unwrap();
+
+        // Now add local tracks (will create new sendrecv transceivers)
+        connection
+            .add_track(audio_track.clone() as Arc<dyn TrackLocal>)
+            .await
+            .unwrap();
+        connection
+            .add_track(video_track.clone() as Arc<dyn TrackLocal>)
+            .await
+            .unwrap();
+
+        // Create and send offer for local tracks
+        let offer = connection.create_offer(None).await.unwrap();
+        connection
+            .set_local_description(offer.clone())
+            .await
+            .unwrap();
+        agent
+            .process_signal(
+                &SignalMessage {
+                    kind: "offer".to_owned(),
+                    room: room.to_owned(),
+                    peer_id: id.to_owned(),
+                    from: id.to_owned(),
+                    to: "server".to_owned(),
+                    display_name: String::new(),
+                    role: String::new(),
+                    muted: false,
+                    camera_on: false,
+                    screen_share: false,
+                    sdp: offer.sdp,
+                    candidate: None,
+                    participants: Vec::new(),
+                },
+                room,
+                id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Wait for answer
+        let answer: SignalMessage = timeout(Duration::from_secs(10), offer_rx.recv())
+            .await
+            .expect("timed out waiting for server answer for local tracks")
+            .expect("server offer channel closed");
+        connection
+            .set_remote_description(RTCSessionDescription::answer(answer.sdp).unwrap())
+            .await
+            .unwrap();
+
+        // Debug: print transceivers after initial negotiation
+        let transceivers = connection.get_transceivers().await;
+        eprintln!("  test peer {}: after initial negotiation, {} transceivers", id, transceivers.len());
+        for (i, t) in transceivers.iter().enumerate() {
+            let direction = t.direction().await;
+            let mid = t.mid().await.unwrap_or_default();
+            let sender = match t.sender().await {
+                Ok(Some(s)) => s,
+                Ok(None) | Err(_) => continue,
+            };
+            let sender_track = sender.track().track_id().await;
+            let _receiver = match t.receiver().await {
+                Ok(Some(r)) => r,
+                Ok(None) | Err(_) => continue,
+            };
+            eprintln!("    transceiver {}: mid={:?}, direction={:?}, sender_track={:?}", i, mid, direction, sender_track);
+        }
+
+        let browser_agent = agent.clone();
+        let browser_room = room.to_owned();
+        let browser_id = id.to_owned();
+        let browser_to_server = tokio::spawn(async move {
+            while let Some(candidate) = candidate_rx.recv().await {
+                let signal = SignalMessage {
+                    kind: "candidate".to_owned(),
+                    room: browser_room.clone(),
+                    peer_id: browser_id.clone(),
+                    from: browser_id.clone(),
+                    to: "server".to_owned(),
+                    display_name: String::new(),
+                    role: String::new(),
+                    muted: false,
+                    camera_on: false,
+                    screen_share: false,
+                    sdp: String::new(),
+                    candidate: Some(CandidateMessage {
+                        candidate: candidate.candidate,
+                        sdp_mid: candidate.sdp_mid,
+                        sdp_mline_index: candidate.sdp_mline_index,
+                    }),
+                    participants: Vec::new(),
+                };
+                let _ = browser_agent
+                    .process_signal(&signal, &browser_room, &browser_id)
+                    .await;
+            }
+        });
+        let browser_connection = connection.clone();
+        let server_to_browser = tokio::spawn(async move {
+            while let Some(payload) = server_signal_rx.recv().await {
+                let Ok(signal) = serde_json::from_str::<SignalMessage>(&payload) else {
+                    continue;
+                };
+                match signal.kind.as_str() {
+                    "candidate" => {
+                        if let Some(candidate) = signal.candidate {
+                            let _ = browser_connection
+                                .add_ice_candidate(RTCIceCandidateInit {
+                                    candidate: candidate.candidate,
+                                    sdp_mid: candidate.sdp_mid,
+                                    sdp_mline_index: candidate.sdp_mline_index,
+                                    username_fragment: None,
+                                    url: None,
+                                })
+                                .await;
+                        }
+                    }
+                    "offer" => {
+                        let _ = offer_tx.send(signal);
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let (packet_tx, packet_rx) = mpsc::unbounded_channel();
+        let peer_id = id.to_owned();
+        tokio::spawn(async move {
+            while let Some(track) = track_rx.recv().await {
+                eprintln!("  test peer {}: received track kind={:?}, id={}, ssrcs={:?}", peer_id, track.kind().await, track.track_id().await, track.ssrcs().await);
+                let mut packet_count = 0u64;
+                while let Some(event) = track.poll().await {
+                    if let TrackRemoteEvent::OnRtpPacket(packet) = event {
+                        packet_count += 1;
+                        if packet_count % 1000 == 1 {
+                            eprintln!("  test peer {}: track {} packet_count={}, pt={}, ssrc={}", peer_id, track.track_id().await, packet_count, packet.header.payload_type, packet.header.ssrc);
+                        }
+                        if packet_tx.send(packet).is_err() {
+                            return;
+                        }
+                    }
+                }
+                eprintln!("  test peer {}: track {} ended, total packets={}", peer_id, track.track_id().await, packet_count);
+            }
+        });
+
+        BidirectionalPeer {
+            id: id.to_owned(),
+            connection,
+            offer_rx,
+            packet_rx,
+            connected_rx,
+            forwarding_tasks: vec![browser_to_server, server_to_browser],
+            audio_track,
+            video_track,
+        }
+    }
+
+    async fn answer_server_offer_bidir(agent: &WebRtcAgent, room: &str, peer: &mut BidirectionalPeer) {
+        let offer = timeout(Duration::from_secs(10), peer.offer_rx.recv())
+            .await
+            .expect("timed out waiting for server renegotiation offer")
+            .expect("server offer channel closed");
+        peer.connection
+            .set_remote_description(RTCSessionDescription::offer(offer.sdp).unwrap())
+            .await
+            .unwrap();
+        let answer = peer.connection.create_answer(None).await.unwrap();
+        peer.connection
+            .set_local_description(answer.clone())
+            .await
+            .unwrap();
+        agent
+            .process_signal(
+                &SignalMessage {
+                    kind: "answer".to_owned(),
+                    room: room.to_owned(),
+                    peer_id: peer.id.clone(),
+                    from: peer.id.clone(),
+                    to: "server".to_owned(),
+                    display_name: String::new(),
+                    role: String::new(),
+                    muted: false,
+                    camera_on: false,
+                    screen_share: false,
+                    sdp: answer.sdp,
+                    candidate: None,
+                    participants: Vec::new(),
+                },
+                room,
+                &peer.id,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn four_peer_all_publishers_acceptance() {
+        let agent = WebRtcAgent::with_udp_addrs(vec!["127.0.0.1:0".to_owned()]);
+        let room = "four-peer-all-publishers";
+
+        // Connect 4 peers, each with unique SSRCs for audio and video
+        let mut peer0 = connect_bidirectional_peer(&agent, room, "peer0", 1000, 2000).await;
+        let mut peer1 = connect_bidirectional_peer(&agent, room, "peer1", 1001, 2001).await;
+        let mut peer2 = connect_bidirectional_peer(&agent, room, "peer2", 1002, 2002).await;
+        let mut peer3 = connect_bidirectional_peer(&agent, room, "peer3", 1003, 2003).await;
+
+        let mut peers = [&mut peer0, &mut peer1, &mut peer2, &mut peer3];
+
+        // Wait for all ICE connections to be established
+        for peer in peers.iter_mut() {
+            timeout(Duration::from_secs(10), peer.connected_rx.recv())
+                .await
+                .expect(&format!("{} did not connect", peer.id))
+                .expect(&format!("{} ICE state stream closed", peer.id));
+        }
+
+        // Start sending RTP from all peers continuously
+        let sender_tasks: Vec<_> = peers
+            .iter()
+            .map(|peer| {
+                let audio_track = peer.audio_track.clone();
+                let video_track = peer.video_track.clone();
+                tokio::spawn(async move {
+                    // Get SSRCs from tracks
+                    let audio_ssrc = audio_track.ssrcs().await.first().copied().unwrap_or(1000);
+                    let video_ssrc = video_track.ssrcs().await.first().copied().unwrap_or(2000);
+                    let mut seq = 1u16;
+                    loop {
+                        // Send audio
+                        let mut audio_packet = Packet::default();
+                        audio_packet.header.version = 2;
+                        audio_packet.header.payload_type = 111;
+                        audio_packet.header.ssrc = audio_ssrc;
+                        audio_packet.header.sequence_number = seq;
+                        audio_packet.header.timestamp = u32::from(seq) * 960;
+                        audio_packet.payload = vec![0xaa; 160].into();
+                        if audio_track.write_rtp(audio_packet).await.is_err() {
+                            break;
+                        }
+
+                        // Send video
+                        let mut video_packet = Packet::default();
+                        video_packet.header.version = 2;
+                        video_packet.header.payload_type = 96;
+                        video_packet.header.ssrc = video_ssrc;
+                        video_packet.header.sequence_number = seq;
+                        video_packet.header.timestamp = u32::from(seq) * 3000;
+                        video_packet.payload = vec![0xbb; 1200].into();
+                        if video_track.write_rtp(video_packet).await.is_err() {
+                            break;
+                        }
+
+                        seq = seq.wrapping_add(1);
+                        sleep(Duration::from_millis(20)).await;
+                    }
+                })
+            })
+            .collect();
+
+        // Give time for ready_peers to be fully populated
+        sleep(Duration::from_millis(200)).await;
+
+        // Wait for all tracks to be published
+        timeout(Duration::from_secs(30), async {
+            loop {
+                let published_tracks = agent.published_tracks.lock().await;
+                let published_count = published_tracks.len();
+                let connections_count = agent.connections.lock().await.len();
+                let ready_count = agent.ready_peers.lock().await.len();
+                eprintln!("published_tracks: {}, connections: {}, ready_peers: {}, keys: {:?}",
+                    published_count, connections_count, ready_count,
+                    published_tracks.keys().collect::<Vec<_>>());
+                if published_count >= 8 {
+                    // 4 peers * 2 tracks each
+                    break;
+                }
+                drop(published_tracks);
+                sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("not all tracks were published to the server");
+
+        // Answer all server renegotiation offers for all peers
+        // Offers are sent as tracks are relayed; answer until no more arrive within timeout
+        for peer in peers.iter_mut() {
+            let mut offer_count = 0;
+            loop {
+                match timeout(Duration::from_secs(5), peer.offer_rx.recv()).await {
+                    Ok(Some(offer)) => {
+                        offer_count += 1;
+                        eprintln!("Received offer {} for peer {}:\n{}", offer_count, peer.id, offer.sdp);
+                        peer.connection
+                            .set_remote_description(RTCSessionDescription::offer(offer.sdp).unwrap())
+                            .await
+                            .unwrap();
+                        let answer = peer.connection.create_answer(None).await.unwrap();
+                        eprintln!("Answer {} for peer {}:\n{}", offer_count, peer.id, answer.sdp);
+                        peer.connection
+                            .set_local_description(answer.clone())
+                            .await
+                            .unwrap();
+                        agent
+                            .process_signal(
+                                &SignalMessage {
+                                    kind: "answer".to_owned(),
+                                    room: room.to_owned(),
+                                    peer_id: peer.id.clone(),
+                                    from: peer.id.clone(),
+                                    to: "server".to_owned(),
+                                    display_name: String::new(),
+                                    role: String::new(),
+                                    muted: false,
+                                    camera_on: false,
+                                    screen_share: false,
+                                    sdp: answer.sdp,
+                                    candidate: None,
+                                    participants: Vec::new(),
+                                },
+                                room,
+                                &peer.id,
+                            )
+                            .await
+                            .unwrap();
+                        eprintln!("Answered offer {} for peer {}", offer_count, peer.id);
+                    }
+                    Ok(None) => {
+                        eprintln!("Offer channel closed for peer {}", peer.id);
+                        break;
+                    }
+                    Err(_) => {
+                        eprintln!("No more offers for peer {} after {} offers", peer.id, offer_count);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Debug: print relays
+        let relays = agent.relays.lock().await;
+        eprintln!("Total relays: {}", relays.len());
+        for (key, relay) in relays.iter() {
+            eprintln!("  Relay: {} -> dest: {}", key, relay.destination_peer_key);
+        }
+        drop(relays);
+
+        // Verify each peer receives audio and video from all 3 other peers
+        for peer in peers.iter_mut() {
+            let mut audio_received = 0u64;
+            let mut video_received = 0u64;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                sleep(Duration::from_millis(10)).await;
+            }
+            // Check packet channel for received packets
+            while let Ok(packet) = peer.packet_rx.try_recv() {
+                if packet.header.payload_type == 111 {
+                    audio_received += 1;
+                } else if packet.header.payload_type == 96 {
+                    video_received += 1;
+                }
+            }
+            eprintln!("Peer {} received: audio={}, video={}", peer.id, audio_received, video_received);
+            // Each peer should receive from 3 other peers
+            // With 50 packets/sec for 10 seconds = 500 packets per track
+            // 3 peers * 500 = 1500 packets per media type
+            assert!(
+                audio_received > 100,
+                "peer {} received too few audio packets: {}",
+                peer.id,
+                audio_received
+            );
+            assert!(
+                video_received > 100,
+                "peer {} received too few video packets: {}",
+                peer.id,
+                video_received
+            );
+        }
+
+        // Cleanup
+        for task in sender_tasks {
+            task.abort();
+        }
+        for peer in peers.iter() {
+            for task in &peer.forwarding_tasks {
+                task.abort();
+            }
+            let _ = peer.connection.close().await;
+            agent.remove_peer(room, &peer.id).await;
+        }
+
+        // Verify cleanup
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let relay_tasks_empty = agent.relay_tasks.lock().await.is_empty();
+                let publications_empty = agent.published_tracks.lock().await.is_empty();
+                let relays_empty = agent.relays.lock().await.is_empty();
+                if relay_tasks_empty && publications_empty && relays_empty {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("relay tasks, publications, or relays remained after teardown");
+
+        assert!(agent.connections.lock().await.is_empty());
+        assert!(agent.senders.lock().await.is_empty());
     }
 }

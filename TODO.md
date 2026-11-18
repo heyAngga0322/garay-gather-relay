@@ -57,11 +57,14 @@ Status as of 2026-11-12: complete and verified. The Thursday slice is implemente
 
 ### Friday, November 13: End-to-End Acceptance and MVP Closeout
 
-- [ ] Run the complete browser flow with automated Chromium peers using fake media devices: create room, join by invite, exchange audio/video, share/stop screen, exercise host admission/removal/mute, disconnect/reconnect, and leave/cleanup.
+Status as of 2026-11-13: the guest-meeting smoke flow is verified in the current workspace. The remaining release-blocking work is the optimized four-participant acceptance workload and capacity validation that still requires explicit performance evidence.
+
+- [x] Run the complete browser flow with automated Chromium peers using fake media devices: create room, join by invite, exchange audio/video, share/stop screen, exercise host admission/removal/mute, disconnect/reconnect, and leave/cleanup.
 - [ ] Add a four-participant relay acceptance workload in an optimized server build with every participant publishing audio and video; verify every expected subscriber receives media, negotiation and teardown complete, and no peer/publication/relay/task state remains after room shutdown.
 - [ ] Validate the configured default capacity of 4 with repeated four-participant workloads under documented host/build conditions, measuring CPU, memory, packet delivery, and cleanup. If it does not pass, fix the relay issue or clearly document that 4 is not a supported capacity and revisit the default; do not infer capacity from the current single-publisher baseline.
-- [ ] Run `cargo fmt --check`, `cargo check`, `cargo test`, the browser end-to-end suite, and the optimized multi-participant acceptance workload. Fix regressions in this sprint's scope before calling the MVP complete.
-- [ ] Update `PROGRESS.md` with shipped behavior, exact commands/results, known limitations, any incomplete criteria, and the next release-blocking work. Update `CLAUDE.md` to reflect the actual media-routing and security architecture.
+- [x] Run `cargo fmt --check`, `cargo check`, `cargo test`, and the browser end-to-end suite. The optimized multi-participant acceptance workload remains unrun and is still a release-blocking gap.
+- [x] Update `PROGRESS.md` with shipped behavior, exact commands/results, known limitations, any incomplete criteria, and the next release-blocking work.
+- [ ] Update `CLAUDE.md` to reflect the actual media-routing and security architecture.
 - [ ] Exit criteria: a fresh checkout can be configured and run from documented steps; automated tests prove the full guest meeting workflow and cleanup; no production-readiness checklist item is marked complete without its own evidence.
 
 ### Sprint-Wide Definition of Done
