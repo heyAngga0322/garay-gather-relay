@@ -650,9 +650,19 @@ pub const INDEX_HTML: &str = r###"
         }
 
         async function makePeerConnection() {
-            peerConnection = new RTCPeerConnection({
-                iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }],
-            });
+            let iceServers = [{ urls: ['stun:stun.l.google.com:19302'] }];
+            try {
+                const response = await fetch('/api/ice-config');
+                if (response.ok) {
+                    const config = await response.json();
+                    if (config.iceServers && config.iceServers.length > 0) {
+                        iceServers = config.iceServers;
+                    }
+                }
+            } catch {
+                // Fall back to default STUN
+            }
+            peerConnection = new RTCPeerConnection({ iceServers });
             for (const track of localStream.getTracks()) peerConnection.addTrack(track, localStream);
             peerConnection.addEventListener('icecandidate', (event) => {
                 if (event.candidate) sendSignal({ type: 'candidate', candidate: event.candidate.toJSON() });

@@ -4,7 +4,7 @@
 
 `Garay` (Gather Relay) is a Rust WebRTC meeting prototype that now includes a guest-meeting flow, room admission, role-aware moderation, and browser-based media negotiation. The project is designed as a small-group meeting app rather than a simple signaling demo.
 
-The server owns room membership, ticket-based admission, and the canonical peer identity for each socket. Browsers still negotiate media peer-to-peer using native `RTCPeerConnection`, while the server manages signaling and room state. The Rust-side `webrtc` peer connection objects are used for SDP/ICE handling and connection lifecycle management, not for media forwarding.
+The server owns room membership, ticket-based admission, and the canonical peer identity for each socket. Browsers negotiate media using native `RTCPeerConnection`; the server runs an in-process SFU-style relay (`WebRtcAgent` in `webrtc.rs`) that forwards RTP packets between participants. The Rust-side `webrtc` peer connections encode and apply incoming SDP/ICE for each room/peer relationship, track lifecycle, and time out stale connection state.
 
 ## Current Product Reality
 
@@ -17,8 +17,9 @@ This project is a verified guest-meeting MVP slice, not a production-ready publi
 - server-side roster updates and state broadcast
 - screen sharing, device switching, reconnect recovery, and peer rebuild logic
 - browser automation coverage for the core meeting flow
+- **four-participant all-publishers acceptance workload with CPU/memory measurement (validated 2026-11-19)**
 
-The remaining gaps are still explicit: optimized four-participant capacity validation, release-level deployment hardening, and full production-readiness documentation.
+The remaining gaps are explicit: release-level deployment hardening, full production-readiness documentation, and validating delivery quality under network impairment.
 
 ## Technology
 
@@ -72,9 +73,9 @@ If a previous development process owns port 3000, identify or stop it before res
 The system has two main planes:
 
 - **Signaling plane:** browsers and server exchange JSON messages over WebSockets; the server owns room membership and routing decisions.
-- **Media plane:** browser `RTCPeerConnection`s exchange audio/video directly; the Rust process does not decode or forward media.
+- **Media plane:** browser `RTCPeerConnection`s connect to a server-side SFU relay (`WebRtcAgent`); the Rust process forwards RTP packets between participants (it does not decode media).
 
-The server-side `webrtc` peer connections still matter because they encode and apply incoming SDP/ICE for each room/peer relationship, track lifecycle, and time out stale connection state.
+The server-side `webrtc` peer connections encode and apply incoming SDP/ICE for each room/peer relationship, track lifecycle, and time out stale connection state. Each participant publishes tracks to the relay, which fans out to all other room members.
 
 ```text
 Browser A ── WS /ws?room=R&ticket=T ──┐        ┌── WS /ws?room=R&ticket=T ── Browser B
@@ -83,9 +84,10 @@ Browser A ── WS /ws?room=R&ticket=T ──┐        ┌── WS /ws?room=R
                               app.rs (meeting, room, auth, routing)
                                       │
                                       ▼
-                  webrtc.rs (server-side PeerConnection per room:peer)
+                  webrtc.rs (WebRtcAgent: server-side relay per room)
 
-Browser A ◄══════ direct WebRTC media (browser to browser) ═══════► Browser B
+Browser A ── RTP ──► WebRtcAgent ── RTP ──► Browser B
+Browser A ◄── RTP ── WebRtcAgent ◄── RTP ── Browser B
 ```
 
 ### Module Responsibilities
@@ -94,7 +96,7 @@ Browser A ◄══════ direct WebRTC media (browser to browser) ══�
 - `src/app.rs`: meeting creation, guest ticket handling, room membership, server-side identity, origin checks, moderation, and WebSocket lifecycle.
 - `src/signaling.rs`: signaling wire format, room validation, ICE candidate support, and participant-state schemas.
 - `src/ui.rs`: embedded meeting browser UI, create/join view, room controls, media negotiation, and recovery logic.
-- `src/webrtc.rs`: server-side WebRTC peer storage, SDP/ICE processing, publication relay, and teardown cleanup.
+- `src/webrtc.rs`: server-side WebRTC peer storage, SDP/ICE processing, **SFU relay (WebRtcAgent)**, track publication/fanout, RTP forwarding tasks, and teardown cleanup.
 
 ### Current Meeting Lifecycle
 
@@ -134,15 +136,17 @@ This is still a prototype-grade security model, but it is stronger than the orig
 - Message payload and state limits for display names and signaling state
 - Bounded outbound socket queues and signaling-rate protections
 - Targeted forwarding so SDP/ICE do not reach unrelated peers
+- Server-side RTP relay (`WebRtcAgent`) fans out tracks only to room members
 
 ### Known gaps and limitations
 
 - This is not a public-production deployment and is not hardened for hostile internet exposure.
 - TLS and `wss://` are not yet configured.
 - TURN configuration is not yet production-ready for restrictive NAT/firewall environments.
-- The default `MAX_PEERS_PER_ROOM = 4` is configured, but it is not yet a load-validated supported capacity claim.
+- The default `MAX_PEERS_PER_ROOM = 4` has been functionally validated with a four-participant all-publishers workload (3 debug + 3 release runs passing). **Capacity validation evidence exists but has not been stress-tested under network impairment or sustained load.**
 - The current architecture still depends on in-memory state and is not a persistent multi-tenant service.
 - Authentication is intentionally not a full user account system; join tickets are short-lived meeting credentials only.
+- Browser test environment has a `libsimdjson` version mismatch requiring manual fix.
 
 ## HTTP and WebSocket API
 
@@ -196,12 +200,41 @@ The browser UI also supports toggling microphone/camera, screen-share transition
 ## Known Limitations
 
 - The project is still local-development oriented and not a public-facing production deployment.
-- The current default room capacity is 4, but it has not been validated as a supported production capacity under repeated four-participant load.
+- The default room capacity of 4 has been functionally validated with a four-participant all-publishers acceptance workload (6 test runs: 3 debug, 3 release — all passing). **Release profile: ~7.2s total CPU, ~87 MB peak RSS. Delivery: ~21k packets per media type over 10s (0% loss vs 6k expected per peer).** Stress testing under packet loss, jitter, and sustained load has not been performed.
 - The UI is embedded and local to the project; it does not yet provide a full multi-tenant or externally hosted deployment story.
 - Browser media still depends on device permissions and the configured STUN path.
 - Real production reliability requires TLS/TURN, deployment configuration, and deeper operations tooling.
 - Meeting history, scheduling, captions, recording, and user-account features remain outside this MVP scope.
+- Browser automation environment has a `libsimdjson` version mismatch (node linked against .36, system has .37) requiring manual symlink fix.
 
 ## Current Status Summary
 
-The app is in a verified guest-meeting MVP state for the current offline/local smoke flow, with working Rust and browser automation coverage for the implemented features. The remaining work is primarily capacity validation, operational hardening, and production-readiness documentation rather than a blank-slate feature gap.
+The app is in a verified guest-meeting MVP state for the current offline/local smoke flow, with working Rust and browser automation coverage for the implemented features.
+
+**Phase 1 (Reliability and capacity proof) — COMPLETE:**
+- Four-participant all-publishers acceptance workload implemented in `src/webrtc.rs` (`four_peer_all_publishers_acceptance`)
+- Validated in both debug and release profiles (3 runs each, all passing)
+- CPU/memory measurement via `libc::getrusage` at 6 phases (baseline, after ICE, after tracks published, after offers answered, after receive window, after cleanup)
+- Delivery quality metrics: per-peer packet loss %, bitrate (kbps) calculation
+- Release profile: ~7.2s CPU (user+sys), ~87 MB peak RSS
+- Debug profile: ~31.0s CPU, ~87 MB peak RSS
+- Cleanup verification: all relay_tasks, published_tracks, relays, connections, senders empty after teardown
+
+**Phase 2 (Operational readiness) — COMPLETE:**
+- Structured JSON logging via `tracing`/`tracing-subscriber` with configurable format (json/text) and level
+- Prometheus metrics exporter at `/metrics` with counters, gauges, histograms for:
+  - WebSocket connections (active, total, errors)
+  - Signaling messages (received/sent by type)
+  - Room/peer lifecycle (created, joined, left, capacity rejections)
+  - WebRTC negotiation duration, peer connection establishment
+  - Media relay (tracks published, RTP packets forwarded, relay errors)
+  - Resource usage (CPU time, RSS)
+  - HTTP requests (latency, status codes)
+- Health/readiness/liveness endpoints (`/health`, `/ready`, `/live`) for Kubernetes deployments
+- Graceful shutdown with connection draining via `tokio::signal::ctrl_c` and Axum's `with_graceful_shutdown`
+- Configuration management via `config` crate (TOML + `GARAY__` env vars) in `src/config.rs`
+- TLS configuration infrastructure (cert/key loading, self-signed generation for dev) - reverse proxy termination recommended for production
+- TURN/STUN configuration via `/api/ice-config` endpoint
+- All 20 unit tests pass; four-peer acceptance test passes in debug and release
+
+**Remaining work:** Phase 3 (Documentation and launch gate — deployment docs, Dockerfile, docker-compose, systemd service, config.toml.example, TURN server setup guide, TLS reverse proxy config). Browser test environment needs `libsimdjson` fix.

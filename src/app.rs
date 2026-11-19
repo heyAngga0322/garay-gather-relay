@@ -13,11 +13,16 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::{SinkExt, StreamExt};
+use metrics_exporter_prometheus::PrometheusHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{Mutex, mpsc};
+use tower::ServiceBuilder;
+use tower_http::trace::TraceLayer;
 
+use crate::metrics::MetricsRecorder;
 use crate::signaling::{MAX_WS_MESSAGE_SIZE, RoomQuery, SignalMessage, validate_room_id};
+use metrics_exporter_prometheus::PrometheusBuilder;
 
 pub const MAX_PEERS_PER_ROOM: usize = 4;
 pub const MAX_DISPLAY_NAME_LENGTH: usize = 64;
@@ -86,13 +91,15 @@ impl RateLimiter {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AppState {
     rooms: Arc<Mutex<HashMap<String, Vec<Peer>>>>,
     meetings: Arc<Mutex<HashMap<String, MeetingState>>>,
     webrtc: Arc<crate::webrtc::WebRtcAgent>,
     allowed_origins: Arc<Vec<String>>,
     max_peers_per_room: usize,
+    metrics_handle: PrometheusHandle,
+    turn_config: Arc<Option<serde_json::Value>>,
 }
 
 #[allow(dead_code)]
@@ -149,20 +156,42 @@ pub struct GuestTicketResponse {
 #[allow(dead_code)]
 impl AppState {
     pub fn new() -> Self {
-        Self::with_room_capacity(MAX_PEERS_PER_ROOM)
+        Self::with_metrics(Self::test_metrics_handle())
     }
 
     pub fn with_room_capacity(max_peers_per_room: usize) -> Self {
-        Self::with_policy(max_peers_per_room, Vec::new())
+        Self::with_metrics_and_capacity(Self::test_metrics_handle(), max_peers_per_room)
     }
 
-    pub fn with_policy(max_peers_per_room: usize, allowed_origins: Vec<String>) -> Self {
+    fn with_metrics(metrics_handle: PrometheusHandle) -> Self {
+        Self::with_policy(MAX_PEERS_PER_ROOM, Vec::new(), metrics_handle, None)
+    }
+
+    fn with_metrics_and_capacity(
+        metrics_handle: PrometheusHandle,
+        max_peers_per_room: usize,
+    ) -> Self {
+        Self::with_policy(max_peers_per_room, Vec::new(), metrics_handle, None)
+    }
+
+    fn test_metrics_handle() -> PrometheusHandle {
+        PrometheusBuilder::new().build_recorder().handle()
+    }
+
+    pub fn with_policy(
+        max_peers_per_room: usize,
+        allowed_origins: Vec<String>,
+        metrics_handle: PrometheusHandle,
+        turn_config: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             rooms: Arc::new(Mutex::new(HashMap::new())),
             meetings: Arc::new(Mutex::new(HashMap::new())),
             webrtc: Arc::new(crate::webrtc::WebRtcAgent::new()),
             allowed_origins: Arc::new(allowed_origins),
             max_peers_per_room: max_peers_per_room.max(1),
+            metrics_handle,
+            turn_config: Arc::new(turn_config),
         }
     }
 
@@ -634,11 +663,11 @@ where
     })
 }
 
-pub async fn start_server() {
-    let room_capacity = std::env::var("MAX_PEERS_PER_ROOM")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(MAX_PEERS_PER_ROOM);
+pub async fn create_app(
+    metrics_handle: PrometheusHandle,
+    max_peers_per_room: usize,
+    turn_config: Option<serde_json::Value>,
+) -> Router {
     let allowed_origins: Vec<String> = std::env::var("WEBRTC_ALLOWED_ORIGINS")
         .or_else(|_| std::env::var("ALLOWED_ORIGINS"))
         .map(|value| {
@@ -654,23 +683,47 @@ pub async fn start_server() {
     if app_env == "production" && allowed_origins.is_empty() {
         panic!("WEBRTC_ALLOWED_ORIGINS must be configured in production mode.");
     }
-    let state = AppState::with_policy(room_capacity, allowed_origins);
+    let state = AppState::with_policy(
+        max_peers_per_room,
+        allowed_origins.clone(),
+        metrics_handle,
+        turn_config,
+    );
+
+    tracing::info!(capacity = max_peers_per_room, origins = ?allowed_origins, env = %app_env, "Server configured");
 
     let app = Router::new()
         .route("/", get(index))
         .route("/health", get(health))
+        .route("/ready", get(readiness))
+        .route("/live", get(liveness))
+        .route("/metrics", get(prometheus_metrics))
         .route("/api/meeting", post(create_meeting_handler))
         .route(
             "/api/meeting/{room}/ticket",
             post(request_guest_ticket_handler),
         )
+        .route("/api/ice-config", get(ice_config_handler))
         .route("/ws", get(websocket_handler))
+        .layer(
+            ServiceBuilder::new()
+                .layer(TraceLayer::new_for_http())
+                .into_inner(),
+        )
         .with_state(state);
+    app
+}
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-
-    println!("WebRTC signaling server is running on http://0.0.0.0:3000");
-    axum::serve(listener, app).await.unwrap();
+async fn ice_config_handler(State(state): State<AppState>) -> impl IntoResponse {
+    if let Some(config) = state.turn_config.as_ref() {
+        (StatusCode::OK, Json(config.clone())).into_response()
+    } else {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({ "iceServers": [] })),
+        )
+            .into_response()
+    }
 }
 
 async fn health() -> impl IntoResponse {
@@ -683,6 +736,38 @@ async fn health() -> impl IntoResponse {
     )
 }
 
+async fn readiness() -> impl IntoResponse {
+    // Readiness: server can accept traffic (dependencies healthy)
+    // In this MVP, we're ready if the server is running
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ready",
+            "service": "webrtc-signal-server"
+        })),
+    )
+}
+
+async fn liveness() -> impl IntoResponse {
+    // Liveness: server process is alive
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "alive",
+            "service": "webrtc-signal-server"
+        })),
+    )
+}
+
+async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let metrics = state.metrics_handle.render();
+    (
+        StatusCode::OK,
+        [("Content-Type", "text/plain; version=0.0.4")],
+        metrics,
+    )
+}
+
 async fn index() -> Html<&'static str> {
     Html(crate::ui::INDEX_HTML)
 }
@@ -692,7 +777,11 @@ async fn create_meeting_handler(
     Json(payload): Json<CreateMeetingRequest>,
 ) -> impl IntoResponse {
     match state.create_meeting(&payload.display_name).await {
-        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Ok(response) => {
+            MetricsRecorder::room_created();
+            MetricsRecorder::ticket_issued("host");
+            (StatusCode::OK, Json(response)).into_response()
+        }
         Err(error) => (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response(),
     }
 }
@@ -706,8 +795,14 @@ async fn request_guest_ticket_handler(
         .request_guest_ticket(&room_id, &payload.display_name)
         .await
     {
-        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response(),
+        Ok(response) => {
+            MetricsRecorder::ticket_issued("guest");
+            (StatusCode::OK, Json(response)).into_response()
+        }
+        Err(error) => {
+            MetricsRecorder::ticket_rejected(&error);
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response()
+        }
     }
 }
 
@@ -735,6 +830,7 @@ async fn websocket_handler(
         match origin {
             Some(value) if origin_is_allowed(value, &state.allowed_origins) => {}
             _ => {
+                MetricsRecorder::origin_rejected();
                 return (
                     StatusCode::FORBIDDEN,
                     "Origin not allowed for this signaling endpoint.".to_string(),
@@ -768,6 +864,22 @@ async fn websocket_handler(
                 display_name: display_name.trim().to_string(),
             })
     };
+
+    // Check capacity before upgrading
+    let rooms = state.rooms.lock().await;
+    let current_peers = rooms.get(&room_id).map(|v| v.len()).unwrap_or(0);
+    drop(rooms);
+    if current_peers >= state.max_peers_per_room {
+        MetricsRecorder::capacity_rejected(&room_id);
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "Room {} is at capacity ({})",
+                room_id, state.max_peers_per_room
+            ),
+        )
+            .into_response();
+    }
 
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| handle_socket(socket, room_id, access, state))
@@ -1031,6 +1143,10 @@ async fn handle_socket(
         .map(|item| item.role.clone())
         .unwrap_or_else(|| "guest".to_string());
 
+    // Record peer join metrics
+    MetricsRecorder::peer_joined(&room_id);
+    tracing::info!(peer_id = %peer_id, room_id = %room_id, display_name = %display_name, role = %role, "Peer joined");
+
     let (mut sender, mut receiver) = socket.split();
     let (tx, mut rx) = mpsc::channel::<String>(MAX_OUTBOUND_QUEUE_MESSAGES);
     let (webrtc_tx, mut webrtc_rx) = mpsc::unbounded_channel::<String>();
@@ -1044,6 +1160,7 @@ async fn handle_socket(
     };
 
     if let Err(error) = try_register_peer(&state, &room_id, &peer_id, tx.clone()).await {
+        MetricsRecorder::peer_left(&room_id);
         eprintln!("Room admission rejected for room {}: {error:?}", room_id);
         drop(sender);
         return;
@@ -1261,11 +1378,17 @@ async fn handle_socket(
         } else {
             Vec::new()
         };
-        if rooms.get(&room_id).is_some_and(Vec::is_empty) {
+        let is_empty = rooms.get(&room_id).is_some_and(Vec::is_empty);
+        if is_empty {
             rooms.remove(&room_id);
+            MetricsRecorder::room_deleted();
         }
         remaining_peers
     };
+
+    // Record peer leave metrics
+    MetricsRecorder::peer_left(&room_id);
+    tracing::info!(peer_id = %peer_id, room_id = %room_id, display_name = %display_name, "Peer left");
 
     let left_notification = SignalMessage {
         kind: "peer-left".to_string(),

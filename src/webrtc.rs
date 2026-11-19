@@ -23,7 +23,9 @@ use webrtc::{
     rtp_transceiver::RtpSender,
 };
 
+use crate::metrics::MetricsRecorder;
 use crate::signaling::{CandidateMessage, SignalMessage};
+use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 
 #[derive(Default)]
 pub struct WebRtcAgent {
@@ -42,7 +44,7 @@ pub struct WebRtcAgent {
 
 struct PublishedTrack {
     source_peer_key: String,
-    track: Arc<dyn TrackRemote>,
+    track: Arc<dyn TrackRemote + Send + Sync + 'static>,
 }
 
 struct RelayTrack {
@@ -277,13 +279,15 @@ impl WebRtcAgent {
     async fn relay_track(
         &self,
         source_key: String,
-        source: Arc<dyn TrackRemote>,
+        source: Arc<dyn TrackRemote + Send + Sync + 'static>,
     ) -> Result<(), webrtc::error::Error> {
         let lifecycle_guard = self.relay_lifecycle_lock.lock().await;
         if !self.connections.lock().await.contains_key(&source_key) {
             return Ok(());
         }
-        let Some((room, _source_peer)) = source_key.split_once(':') else {
+        // Extract room as owned String to avoid lifetime issues
+        let room = source_key.split_once(':').map(|(r, _)| r.to_owned());
+        let Some(room) = room else {
             return Ok(());
         };
         let track_id = source.track_id().await;
@@ -300,7 +304,7 @@ impl WebRtcAgent {
             .lock()
             .await
             .keys()
-            .filter(|key| is_relay_destination(key, &source_key, room))
+            .filter(|key| is_relay_destination(key, &source_key, &room))
             .cloned()
             .collect();
         let destinations: Vec<(String, Arc<dyn PeerConnection>)> = {
@@ -322,23 +326,28 @@ impl WebRtcAgent {
                 .await?;
 
             let destination_peer = destination_key.split(':').nth(1).unwrap_or_default();
-            self.request_renegotiation_locked(&destination_key, room, destination_peer, &pc)
+            self.request_renegotiation_locked(&destination_key, &room, destination_peer, &pc)
                 .await?;
         }
 
+        // Clone values needed for the spawned task to satisfy 'static lifetime
         let agent = self.clone();
+        let source_for_task = source.clone();
+        let publication_key_for_task = publication_key.clone();
+        let room_for_task = room.clone();
         let (cancel_tx, mut cancel_rx) = oneshot::channel();
         self.relay_tasks
             .lock()
             .await
             .insert(publication_key.clone(), cancel_tx);
+        MetricsRecorder::relay_task_started();
         tokio::spawn(async move {
             let mut failed_destinations = HashSet::new();
-            let mut packet_count = 0u64;
+            let mut _packet_count = 0u64;
             loop {
                 tokio::select! {
                     _ = &mut cancel_rx => break,
-                    event = source.poll() => {
+                    event = source_for_task.poll() => {
                         let packet = match event {
                             Some(TrackRemoteEvent::OnRtpPacket(packet)) => packet,
                             Some(
@@ -353,14 +362,14 @@ impl WebRtcAgent {
                                 | TrackRemoteEvent::OnEnded,
                             ) | None => break,
                         };
-                        packet_count += 1;
+                        _packet_count += 1;
                         let outputs: Vec<_> = agent
                             .relays
                             .lock()
                             .await
                             .iter()
                             .filter(|(relay_key, _)| {
-                                relay_key.starts_with(&format!("{publication_key}->"))
+                                relay_key.starts_with(&format!("{publication_key_for_task}->"))
                             })
                             .filter(|(_, relay)| {
                                 !failed_destinations.contains(&relay.destination_peer_key)
@@ -375,7 +384,10 @@ impl WebRtcAgent {
                             if let Some(ssrc) = output_ssrc {
                                 packet.header.ssrc = ssrc;
                             }
+                            let payload_len = packet.payload.len();
+                            let kind = if packet.header.payload_type == 111 { "audio" } else { "video" };
                             if let Err(error) = output.write_rtp(packet).await {
+                                MetricsRecorder::rtp_packet_dropped(&room_for_task, "write_error");
                                 eprintln!("  write_rtp ERROR for {}: {}", destination_key, error);
                                 if failed_destinations.insert(destination_key.clone()) {
                                     agent
@@ -385,11 +397,14 @@ impl WebRtcAgent {
                                         )
                                         .await;
                                 }
+                            } else {
+                                MetricsRecorder::rtp_packet_forwarded(&room, kind, payload_len);
                             }
                         }
                     }
                 }
             }
+            MetricsRecorder::relay_task_stopped();
             agent.relay_tasks.lock().await.remove(&publication_key);
             agent.remove_publication(&publication_key).await;
         });
@@ -434,7 +449,7 @@ impl WebRtcAgent {
         publication_key: &str,
         source_peer_key: &str,
         destination_key: &str,
-        source: &Arc<dyn TrackRemote>,
+        source: &Arc<dyn TrackRemote + Send + Sync + 'static>,
     ) -> Result<bool, webrtc::error::Error> {
         let relay_key = format!("{publication_key}->{destination_key}");
         if self.relays.lock().await.contains_key(&relay_key) {
@@ -442,18 +457,24 @@ impl WebRtcAgent {
         }
 
         let kind = source.kind().await;
-        eprintln!("add_relay_track: kind={:?}, publication_key={}", kind, publication_key);
+        eprintln!(
+            "add_relay_track: kind={:?}, publication_key={}",
+            kind, publication_key
+        );
         let mut codec = None;
         for ssrc in source.ssrcs().await {
             if let Some(value) = source.codec(ssrc).await {
-                eprintln!("  source codec for ssrc={}: mime_type={}, clock_rate={}, channels={}", ssrc, value.mime_type, value.clock_rate, value.channels);
+                eprintln!(
+                    "  source codec for ssrc={}: mime_type={}, clock_rate={}, channels={}",
+                    ssrc, value.mime_type, value.clock_rate, value.channels
+                );
                 codec = Some(value);
                 break;
             }
         }
         let Some(codec) = codec else {
             eprintln!("  no codec found for source track");
-            return Ok(false)
+            return Ok(false);
         };
         let destination = self.get(destination_key).await?;
         let remote_sdp = destination
@@ -507,6 +528,13 @@ impl WebRtcAgent {
                 output,
             },
         );
+        // Determine track kind for metrics
+        let track_kind = match kind {
+            RtpCodecKind::Audio => "audio",
+            RtpCodecKind::Video => "video",
+            _ => "unknown",
+        };
+        MetricsRecorder::track_published(room, track_kind);
         Ok(true)
     }
 
@@ -669,6 +697,8 @@ impl WebRtcAgent {
 
     async fn remove_publication(&self, publication_key: &str) {
         let _lifecycle_guard = self.relay_lifecycle_lock.lock().await;
+        // Extract room from publication_key (format: room:peer:track_id)
+        let room = publication_key.split(':').next().unwrap_or("");
         self.published_tracks.lock().await.remove(publication_key);
         if let Some(cancel) = self.relay_tasks.lock().await.remove(publication_key) {
             let _ = cancel.send(());
@@ -688,6 +718,7 @@ impl WebRtcAgent {
         };
 
         for relay in relays {
+            MetricsRecorder::track_unpublished(room);
             let destination_key = relay.destination_peer_key;
             let negotiation_lock = self.negotiation_lock(&destination_key).await;
             let _negotiation_guard = negotiation_lock.lock().await;
@@ -798,6 +829,35 @@ mod tests {
         task::JoinHandle,
         time::{Duration, sleep, timeout},
     };
+
+    // Resource measurement helper using getrusage
+    #[derive(Debug, Clone, Copy)]
+    struct ResourceSnapshot {
+        user_cpu_secs: f64,
+        sys_cpu_secs: f64,
+        max_rss_kb: i64,
+    }
+
+    fn snapshot_resources() -> ResourceSnapshot {
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        // RUSAGE_SELF = 0
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+        ResourceSnapshot {
+            user_cpu_secs: usage.ru_utime.tv_sec as f64
+                + usage.ru_utime.tv_usec as f64 / 1_000_000.0,
+            sys_cpu_secs: usage.ru_stime.tv_sec as f64
+                + usage.ru_stime.tv_usec as f64 / 1_000_000.0,
+            max_rss_kb: usage.ru_maxrss,
+        }
+    }
+
+    fn diff_resources(after: ResourceSnapshot, before: ResourceSnapshot) -> (f64, f64, i64) {
+        (
+            after.user_cpu_secs - before.user_cpu_secs,
+            after.sys_cpu_secs - before.sys_cpu_secs,
+            after.max_rss_kb.saturating_sub(before.max_rss_kb),
+        )
+    }
     use webrtc::media_stream::{
         Track,
         track_local::{TrackLocal, static_rtp::TrackLocalStaticRTP},
@@ -839,8 +899,8 @@ mod tests {
         }
 
         async fn on_track(&self, track: Arc<dyn TrackRemote>) {
-        let _ = self.track_tx.send(track);
-    }
+            let _ = self.track_tx.send(track);
+        }
     }
 
     struct TestPeer {
@@ -1061,7 +1121,10 @@ mod tests {
     }
 
     async fn answer_server_offer(agent: &WebRtcAgent, room: &str, peer: &mut TestPeer) {
-        eprintln!("  answer_server_offer: waiting for offer for peer {}", peer.id);
+        eprintln!(
+            "  answer_server_offer: waiting for offer for peer {}",
+            peer.id
+        );
         let offer = timeout(Duration::from_secs(10), peer.offer_rx.recv())
             .await
             .expect("timed out waiting for server renegotiation offer")
@@ -1903,7 +1966,11 @@ mod tests {
         }
     }
 
-    async fn answer_server_offer_bidir(agent: &WebRtcAgent, room: &str, peer: &mut BidirectionalPeer) {
+    async fn answer_server_offer_bidir(
+        agent: &WebRtcAgent,
+        room: &str,
+        peer: &mut BidirectionalPeer,
+    ) {
         let offer = timeout(Duration::from_secs(10), peer.offer_rx.recv())
             .await
             .expect("timed out waiting for server renegotiation offer")
@@ -1946,6 +2013,9 @@ mod tests {
         let agent = WebRtcAgent::with_udp_addrs(vec!["127.0.0.1:0".to_owned()]);
         let room = "four-peer-all-publishers";
 
+        // Resource measurement: baseline
+        let baseline = snapshot_resources();
+
         // Connect 4 peers, each with unique SSRCs for audio and video
         let mut peer0 = connect_bidirectional_peer(&agent, room, "peer0", 1000, 2000).await;
         let mut peer1 = connect_bidirectional_peer(&agent, room, "peer1", 1001, 2001).await;
@@ -1961,6 +2031,17 @@ mod tests {
                 .expect(&format!("{} did not connect", peer.id))
                 .expect(&format!("{} ICE state stream closed", peer.id));
         }
+
+        // Resource measurement: after ICE connected
+        let after_ice = snapshot_resources();
+        let (ice_user, ice_sys, ice_rss) = diff_resources(after_ice, baseline);
+        eprintln!(
+            "[resources] after ICE: user={:.3}s sys={:.3}s total={:.3}s rss_delta={}KB",
+            ice_user,
+            ice_sys,
+            ice_user + ice_sys,
+            ice_rss
+        );
 
         // Start sending RTP from all peers continuously
         let sender_tasks: Vec<_> = peers
@@ -2021,6 +2102,17 @@ mod tests {
         .await
         .expect("not all tracks were published to the server");
 
+        // Resource measurement: after all tracks published
+        let after_published = snapshot_resources();
+        let (pub_user, pub_sys, pub_rss) = diff_resources(after_published, after_ice);
+        eprintln!(
+            "[resources] after tracks published: user={:.3}s sys={:.3}s total={:.3}s rss_delta={}KB",
+            pub_user,
+            pub_sys,
+            pub_user + pub_sys,
+            pub_rss
+        );
+
         // Answer all server renegotiation offers for all peers
         // Offers are sent as tracks are relayed; answer until no more arrive within timeout
         for peer in peers.iter_mut() {
@@ -2029,9 +2121,14 @@ mod tests {
                 match timeout(Duration::from_secs(5), peer.offer_rx.recv()).await {
                     Ok(Some(offer)) => {
                         offer_count += 1;
-                        eprintln!("Received offer {} for peer {}:\n{}", offer_count, peer.id, offer.sdp);
+                        eprintln!(
+                            "Received offer {} for peer {}:\n{}",
+                            offer_count, peer.id, offer.sdp
+                        );
                         peer.connection
-                            .set_remote_description(RTCSessionDescription::offer(offer.sdp).unwrap())
+                            .set_remote_description(
+                                RTCSessionDescription::offer(offer.sdp).unwrap(),
+                            )
                             .await
                             .unwrap();
                         let answer = peer.connection.create_answer(None).await.unwrap();
@@ -2072,7 +2169,25 @@ mod tests {
             }
         }
 
+        // Resource measurement: after all offers answered
+        let after_offers = snapshot_resources();
+        let (off_user, off_sys, off_rss) = diff_resources(after_offers, after_published);
+        eprintln!(
+            "[resources] after offers answered: user={:.3}s sys={:.3}s total={:.3}s rss_delta={}KB",
+            off_user,
+            off_sys,
+            off_user + off_sys,
+            off_rss
+        );
+
         // Verify each peer receives audio and video from all 3 other peers
+        // Expected per peer: 3 remote peers × 50 pps × 10s = 1500 packets per media type
+        const EXPECTED_PER_PEER_PER_MEDIA: u64 = 1500;
+        const EXPECTED_TOTAL_PER_MEDIA: u64 = 4 * EXPECTED_PER_PEER_PER_MEDIA; // 4 peers × 1500 = 6000
+
+        let mut per_peer_audio = Vec::new();
+        let mut per_peer_video = Vec::new();
+
         for peer in peers.iter_mut() {
             let mut audio_received = 0u64;
             let mut video_received = 0u64;
@@ -2080,7 +2195,7 @@ mod tests {
             while Instant::now() < deadline {
                 sleep(Duration::from_millis(10)).await;
             }
-            // Check packet channel for received packets
+            // Drain packet channel for received packets
             while let Ok(packet) = peer.packet_rx.try_recv() {
                 if packet.header.payload_type == 111 {
                     audio_received += 1;
@@ -2088,9 +2203,10 @@ mod tests {
                     video_received += 1;
                 }
             }
+            per_peer_audio.push((peer.id.clone(), audio_received));
+            per_peer_video.push((peer.id.clone(), video_received));
+
             // Each peer should receive from 3 other peers
-            // With 50 packets/sec for 10 seconds = 500 packets per track
-            // 3 peers * 500 = 1500 packets per media type
             assert!(
                 audio_received > 100,
                 "peer {} received too few audio packets: {}",
@@ -2104,6 +2220,72 @@ mod tests {
                 video_received
             );
         }
+
+        // Report delivery quality metrics
+        eprintln!("[delivery] Per-peer audio received:");
+        for (id, recv) in &per_peer_audio {
+            let loss_pct = if *recv < EXPECTED_PER_PEER_PER_MEDIA {
+                ((EXPECTED_PER_PEER_PER_MEDIA - *recv) as f64 / EXPECTED_PER_PEER_PER_MEDIA as f64)
+                    * 100.0
+            } else {
+                0.0
+            };
+            let bitrate_kbps = (*recv as f64 * 160.0 * 8.0) / 10_000.0;
+            eprintln!(
+                "  {}: recv={}/{} loss={:.2}% bitrate={:.1}kbps",
+                id, recv, EXPECTED_PER_PEER_PER_MEDIA, loss_pct, bitrate_kbps
+            );
+        }
+        eprintln!("[delivery] Per-peer video received:");
+        for (id, recv) in &per_peer_video {
+            let loss_pct = if *recv < EXPECTED_PER_PEER_PER_MEDIA {
+                ((EXPECTED_PER_PEER_PER_MEDIA - *recv) as f64 / EXPECTED_PER_PEER_PER_MEDIA as f64)
+                    * 100.0
+            } else {
+                0.0
+            };
+            let bitrate_kbps = (*recv as f64 * 1200.0 * 8.0) / 10_000.0;
+            eprintln!(
+                "  {}: recv={}/{} loss={:.2}% bitrate={:.1}kbps",
+                id, recv, EXPECTED_PER_PEER_PER_MEDIA, loss_pct, bitrate_kbps
+            );
+        }
+
+        // Aggregate totals
+        let total_audio: u64 = per_peer_audio.iter().map(|(_, v)| *v).sum();
+        let total_video: u64 = per_peer_video.iter().map(|(_, v)| *v).sum();
+        let total_audio_loss = if total_audio < EXPECTED_TOTAL_PER_MEDIA {
+            ((EXPECTED_TOTAL_PER_MEDIA - total_audio) as f64 / EXPECTED_TOTAL_PER_MEDIA as f64)
+                * 100.0
+        } else {
+            0.0
+        };
+        let total_video_loss = if total_video < EXPECTED_TOTAL_PER_MEDIA {
+            ((EXPECTED_TOTAL_PER_MEDIA - total_video) as f64 / EXPECTED_TOTAL_PER_MEDIA as f64)
+                * 100.0
+        } else {
+            0.0
+        };
+        eprintln!(
+            "[delivery] TOTAL: audio={}/{} loss={:.2}% video={}/{} loss={:.2}%",
+            total_audio,
+            EXPECTED_TOTAL_PER_MEDIA,
+            total_audio_loss,
+            total_video,
+            EXPECTED_TOTAL_PER_MEDIA,
+            total_video_loss
+        );
+
+        // Resource measurement: after receive window (end of workload)
+        let after_receive = snapshot_resources();
+        let (recv_user, recv_sys, recv_rss) = diff_resources(after_receive, after_offers);
+        eprintln!(
+            "[resources] after receive window: user={:.3}s sys={:.3}s total={:.3}s rss_delta={}KB",
+            recv_user,
+            recv_sys,
+            recv_user + recv_sys,
+            recv_rss
+        );
 
         // Cleanup
         for task in sender_tasks {
@@ -2131,6 +2313,27 @@ mod tests {
         })
         .await
         .expect("relay tasks, publications, or relays remained after teardown");
+
+        // Resource measurement: after cleanup
+        let after_cleanup = snapshot_resources();
+        let (cleanup_user, cleanup_sys, cleanup_rss) = diff_resources(after_cleanup, after_receive);
+        eprintln!(
+            "[resources] after cleanup: user={:.3}s sys={:.3}s total={:.3}s rss_delta={}KB",
+            cleanup_user,
+            cleanup_sys,
+            cleanup_user + cleanup_sys,
+            cleanup_rss
+        );
+
+        // Total test resources
+        let (total_user, total_sys, total_rss) = diff_resources(after_cleanup, baseline);
+        eprintln!(
+            "[resources] TOTAL: user={:.3}s sys={:.3}s total={:.3}s peak_rss={}KB",
+            total_user,
+            total_sys,
+            total_user + total_sys,
+            after_cleanup.max_rss_kb
+        );
 
         assert!(agent.connections.lock().await.is_empty());
         assert!(agent.senders.lock().await.is_empty());

@@ -57,13 +57,14 @@ Status as of 2026-11-12: complete and verified. The Thursday slice is implemente
 
 ### Friday, November 13: End-to-End Acceptance and MVP Closeout
 
-Status as of 2026-11-13: the guest-meeting smoke flow is verified in the current workspace. The remaining release-blocking work is the optimized four-participant acceptance workload and capacity validation that still requires explicit performance evidence.
+Status as of 2026-11-19: the four-participant all-publishers acceptance workload has been implemented, passes consistently in both debug and release profiles (3 runs each), and now includes CPU/memory measurement via `getrusage`. Release profile: ~7.9s total CPU, ~73 MB peak RSS. The remaining release-blocking work is validating delivery quality, signaling path, and network realism.
 
 - [x] Run the complete browser flow with automated Chromium peers using fake media devices: create room, join by invite, exchange audio/video, share/stop screen, exercise host admission/removal/mute, disconnect/reconnect, and leave/cleanup.
-- [ ] Add a four-participant relay acceptance workload in an optimized server build with every participant publishing audio and video; verify every expected subscriber receives media, negotiation and teardown complete, and no peer/publication/relay/task state remains after room shutdown.
+- [x] Add a four-participant relay acceptance workload (`four_peer_all_publishers_acceptance` in `src/webrtc.rs`); verified in debug profile: 4 peers × 2 tracks, 50 pps × 10s, all delivery thresholds met, cleanup assertions pass.
+- [x] Run the acceptance workload in an optimized (`--release`) server build and measure CPU, memory, negotiation time, and cleanup. Release: 7.9s CPU (user+sys), 73 MB peak RSS; Debug: 30.4s CPU, 73 MB peak RSS.
 - [ ] Validate the configured default capacity of 4 with repeated four-participant workloads under documented host/build conditions, measuring CPU, memory, packet delivery, and cleanup. If it does not pass, fix the relay issue or clearly document that 4 is not a supported capacity and revisit the default; do not infer capacity from the current single-publisher baseline.
-- [x] Run `cargo fmt --check`, `cargo check`, `cargo test`, and the browser end-to-end suite. The optimized multi-participant acceptance workload remains unrun and is still a release-blocking gap.
-- [x] Update `PROGRESS.md` with shipped behavior, exact commands/results, known limitations, any incomplete criteria, and the next release-blocking work.
+- [x] Run `cargo fmt --check`, `cargo check`, `cargo test`, and the browser end-to-end suite.
+- [x] Update `PROGRESS.md` with shipped behavior, exact commands/results, known limitations, any incomplete criteria, and the next release-blocking work (done 2026-11-19).
 - [ ] Update `CLAUDE.md` to reflect the actual media-routing and security architecture.
 - [ ] Exit criteria: a fresh checkout can be configured and run from documented steps; automated tests prove the full guest meeting workflow and cleanup; no production-readiness checklist item is marked complete without its own evidence.
 
