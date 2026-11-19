@@ -1,0 +1,38 @@
+# docker-compose.yml - Development stack for Garay
+# Usage: docker compose up -d
+# For production with TURN: docker compose -f docker-compose.yml -f docker-compose.turn.yml up -d
+
+services:
+  garay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: garay
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GARAY__BIND_ADDRESS=0.0.0.0:3000
+      - GARAY__LOG_FORMAT=json
+      - GARAY__LOG_LEVEL=info
+      - GARAY__MAX_PEERS_PER_ROOM=4
+      - WEBRTC_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+      - APP_ENV=development
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:3000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    networks:
+      - garay-network
+
+  # Optional: coturn TURN/STUN server for NAT traversal
+  # Enable with: docker compose -f docker-compose.yml -f docker-compose.turn.yml up -d
+  # See TURN_SETUP.md for configuration details
+
+networks:
+  garay-network:
+    driver: bridge

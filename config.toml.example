@@ -1,0 +1,64 @@
+# Garay WebRTC Signaling Server Configuration
+# Copy to config.toml and customize, or use environment variables with GARAY__ prefix
+# Example: GARAY__BIND_ADDRESS="0.0.0.0:3000"
+
+[server]
+# Network bind address (host:port)
+# Environment: GARAY__BIND_ADDRESS
+bind_address = "0.0.0.0:3000"
+
+# Maximum peers per room (1-16 recommended)
+# Environment: GARAY__MAX_PEERS_PER_ROOM
+max_peers_per_room = 4
+
+# Logging format: "json" or "text"
+# Environment: GARAY__LOG_FORMAT
+log_format = "json"
+
+# Log level: "trace", "debug", "info", "warn", "error"
+# Environment: GARAY__LOG_LEVEL
+log_level = "info"
+
+# TLS Configuration
+# In production, terminate TLS at reverse proxy (nginx/Caddy/Traefik)
+# and connect to Garay via plain HTTP.
+# Set tls_enabled = true only for development with self-signed certs.
+[server.tls]
+# Enable TLS (default: false)
+# Environment: GARAY__TLS_ENABLED
+tls_enabled = false
+
+# Path to TLS certificate file (PEM format)
+# Environment: GARAY__TLS__CERT_PATH
+# cert_path = "/etc/garay/certs/server.crt"
+
+# Path to TLS private key file (PEM format, PKCS#8)
+# Environment: GARAY__TLS__KEY_PATH
+# key_path = "/etc/garay/certs/server.key"
+
+# Auto-generate self-signed certificate for development (default: true)
+# Only used if cert_path/key_path not set
+# Environment: GARAY__TLS__AUTO_GENERATE
+auto_generate = true
+
+# TURN/STUN Configuration
+# Configure TURN servers for NAT traversal in restrictive networks.
+# Obtain credentials from your TURN server (coturn, eturnal, etc.)
+[server.turn]
+# List of ICE server URLs (STUN and/or TURN)
+# Examples:
+#   STUN: "stun:stun.l.google.com:19302"
+#   TURN: "turn:turn.example.com:3478?transport=udp"
+#   TURNS: "turns:turn.example.com:5349?transport=tcp"
+# Environment: GARAY__TURN__URLS
+urls = [
+  "stun:stun.l.google.com:19302"
+]
+
+# TURN username (required for TURN URLs)
+# Environment: GARAY__TURN__USERNAME
+# username = "garay-user"
+
+# TURN credential (password or static auth secret)
+# Environment: GARAY__TURN__CREDENTIAL
+# credential = "your-turn-password"

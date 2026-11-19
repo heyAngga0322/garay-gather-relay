@@ -1,0 +1,24 @@
+# docker-compose.turn.yml - TURN/STUN server for NAT traversal
+# Usage: docker compose -f docker-compose.yml -f docker-compose.turn.yml up -d
+#
+# Required: Create turnserver.conf in ./coturn/ directory (see TURN_SETUP.md)
+# Generate credentials: ./generate-turn-credentials.sh
+
+services:
+  coturn:
+    image: instrumentisto/coturn:latest
+    container_name: garay-coturn
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - TURN_SERVER_REALM=garay.local
+      - TURN_SERVER_USERNAME=garay-user
+      - TURN_SERVER_PASSWORD=changeme
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    healthcheck:
+      test: ["CMD", "turnadmin", "-l"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3

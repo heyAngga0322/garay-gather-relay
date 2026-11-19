@@ -3,6 +3,10 @@ name = "garay"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "garay"
+path = "src/main.rs"
+
 [dependencies]
 async-trait = "0.1"
 axum = { version = "0.8.9", features = ["ws"] }
@@ -29,3 +33,6 @@ thiserror = "1.0"
 
 [dev-dependencies]
 libc = "0.2"
+reqwest = { version = "0.12", features = ["json"] }
+tokio-tungstenite = { version = "0.27", features = ["rustls"] }
+serial_test = "3.0"

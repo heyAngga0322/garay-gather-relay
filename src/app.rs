@@ -1151,7 +1151,7 @@ async fn handle_socket(
     let (tx, mut rx) = mpsc::channel::<String>(MAX_OUTBOUND_QUEUE_MESSAGES);
     let (webrtc_tx, mut webrtc_rx) = mpsc::unbounded_channel::<String>();
 
-    let existing_peers = {
+    let _existing_peers = {
         let rooms = state.rooms.lock().await;
         rooms
             .get(&room_id)
@@ -1237,26 +1237,9 @@ async fn handle_socket(
         }
     }
 
-    for existing_peer_id in existing_peers {
-        let notification = SignalMessage {
-            kind: "peer-joined".to_string(),
-            room: room_id.clone(),
-            peer_id: existing_peer_id.clone(),
-            from: existing_peer_id,
-            to: peer_id.clone(),
-            display_name: display_name.clone(),
-            role: role.clone(),
-            muted: false,
-            camera_on: true,
-            screen_share: false,
-            sdp: String::new(),
-            candidate: None,
-            participants: roster.clone(),
-        };
-        if let Ok(payload) = serde_json::to_string(&notification) {
-            let _ = tx.send(payload).await;
-        }
-    }
+    // NOTE: We intentionally do NOT send individual peer-joined for existing peers to the new peer
+    // because the welcome message already includes the full roster. Sending redundant peer-joined
+    // messages would cause clients to process duplicate join notifications.
 
     state.broadcast_roster_snapshot(&room_id).await;
 

@@ -1,9 +1,9 @@
-mod app;
-mod config;
-mod metrics;
-mod signaling;
-mod ui;
-mod webrtc;
+pub mod app;
+pub mod config;
+pub mod metrics;
+pub mod signaling;
+pub mod ui;
+pub mod webrtc;
 
 use config::ServerConfig;
 use metrics_exporter_prometheus::PrometheusBuilder;

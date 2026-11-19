@@ -1,0 +1,49 @@
+# garay.service - Systemd service for Garay WebRTC Signaling Server
+# Install: sudo cp garay.service /etc/systemd/system/
+# Enable: sudo systemctl enable garay
+# Start: sudo systemctl start garay
+
+[Unit]
+Description=Garay WebRTC Signaling Server
+Documentation=https://github.com/your-org/garay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=garay
+Group=garay
+WorkingDirectory=/opt/garay
+EnvironmentFile=-/etc/garay/garay.env
+ExecStart=/opt/garay/garay
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/garay /var/log/garay
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=garay
+
+[Install]
+WantedBy=multi-user.target
