@@ -1,5 +1,6 @@
 pub mod app;
 pub mod config;
+pub mod error_logging;
 pub mod metrics;
 pub mod signaling;
 pub mod ui;
@@ -8,7 +9,8 @@ pub mod webrtc;
 use config::ServerConfig;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tokio::signal::ctrl_c;
-use tracing::info;
+
+use crate::error_logging::{log_server_shutdown, log_server_starting};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,12 +45,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("failed to bind to address");
 
-    info!(address = %listener.local_addr().unwrap(), "WebRTC signaling server starting");
+    log_server_starting(&listener.local_addr().unwrap().to_string());
 
     // Graceful shutdown with connection draining
     let shutdown = async {
         ctrl_c().await.expect("failed to install Ctrl+C handler");
-        info!("Shutdown signal received, draining connections...");
+        log_server_shutdown();
     };
 
     axum::serve(listener, app)

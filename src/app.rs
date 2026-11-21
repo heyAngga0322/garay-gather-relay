@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    fmt,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -20,6 +21,7 @@ use tokio::sync::{Mutex, mpsc};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 
+use crate::error_logging::*;
 use crate::metrics::MetricsRecorder;
 use crate::signaling::{MAX_WS_MESSAGE_SIZE, RoomQuery, SignalMessage, validate_room_id};
 use metrics_exporter_prometheus::PrometheusBuilder;
@@ -409,7 +411,7 @@ impl AppState {
 
         for peer in peers {
             if peer.tx.try_send(payload.clone()).is_err() {
-                eprintln!("Dropping roster update for slow client in room {room_id}");
+                log_ws_slow_client(&peer.id, &room_id, "roster");
             }
         }
     }
@@ -543,6 +545,17 @@ pub struct Peer {
 pub enum RoomAdmissionError {
     InvalidRoomId(String),
     RoomFull { room: String, limit: usize },
+}
+
+impl fmt::Display for RoomAdmissionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RoomAdmissionError::InvalidRoomId(msg) => write!(f, "Invalid room ID: {}", msg),
+            RoomAdmissionError::RoomFull { room, limit } => {
+                write!(f, "Room {} is at capacity (limit: {})", room, limit)
+            }
+        }
+    }
 }
 
 pub fn validate_message_size(message: &str) -> Result<(), String> {
@@ -1161,7 +1174,7 @@ async fn handle_socket(
 
     if let Err(error) = try_register_peer(&state, &room_id, &peer_id, tx.clone()).await {
         MetricsRecorder::peer_left(&room_id);
-        eprintln!("Room admission rejected for room {}: {error:?}", room_id);
+        log_room_admission_error(&room_id, &error, "capacity_or_validation");
         drop(sender);
         return;
     }
@@ -1170,7 +1183,9 @@ async fn handle_socket(
         let _ = state
             .register_participant(&room_id, &peer_id, access)
             .await
-            .map_err(|error| eprintln!("participant registration failed: {error}"));
+            .map_err(|error| {
+                log_webrtc_error(&peer_id, &room_id, &error, "participant_registration")
+            });
     }
 
     state
@@ -1232,7 +1247,7 @@ async fn handle_socket(
     for peer in peers {
         if peer.id != peer_id {
             if peer.tx.send(joined_payload.clone()).await.is_err() {
-                eprintln!("Dropping peer-joined update for slow client in room {room_id}");
+                log_ws_slow_client(&peer.id, &room_id, "peer-joined");
             }
         }
     }
@@ -1254,10 +1269,7 @@ async fn handle_socket(
     while let Some(Ok(message)) = receiver.next().await {
         if let Message::Text(text) = message {
             if let Err(error) = validate_message_size(&text) {
-                eprintln!(
-                    "WebSocket message rejected for peer {} in room {}: {error}",
-                    peer_id, room_id
-                );
+                log_ws_error(&peer_id, &room_id, &error, "message_size_exceeded");
                 break;
             }
 
@@ -1267,17 +1279,11 @@ async fn handle_socket(
 
             if !signal.display_name.trim().is_empty() {
                 if let Err(error) = validate_display_name(&signal.display_name) {
-                    eprintln!(
-                        "Invalid display name for peer {} in room {}: {error}",
-                        peer_id, room_id
-                    );
+                    log_ws_error(&peer_id, &room_id, &error, "invalid_display_name");
                     break;
                 }
                 if let Err(error) = validate_signal_state(&signal.display_name) {
-                    eprintln!(
-                        "Display name payload too large for peer {} in room {}: {error}",
-                        peer_id, room_id
-                    );
+                    log_ws_error(&peer_id, &room_id, &error, "display_name_payload_too_large");
                     break;
                 }
             }
@@ -1298,10 +1304,7 @@ async fn handle_socket(
 
             if signal.kind == "state" || signal.kind == "participant-state" {
                 if let Err(error) = validate_signal_state(&signal.display_name) {
-                    eprintln!(
-                        "State payload for peer {} in room {} rejected: {error}",
-                        peer_id, room_id
-                    );
+                    log_ws_error(&peer_id, &room_id, &error, "state_payload_too_large");
                     break;
                 }
                 let mut meetings = state.meetings.lock().await;
@@ -1332,18 +1335,12 @@ async fn handle_socket(
                             .flush_queued_negotiation(&room_id, &peer_id)
                             .await
                     {
-                        eprintln!(
-                            "queued WebRTC negotiation failed for peer {} in room {}: {}",
-                            peer_id, room_id, error
-                        );
+                        log_webrtc_negotiation_error(&peer_id, &room_id, &error, "flush_queued");
                     }
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    eprintln!(
-                        "webrtc error for peer {} in room {}: {}",
-                        peer_id, room_id, error
-                    );
+                    log_webrtc_error(&peer_id, &room_id, &error, "process_signal");
                 }
             }
         }
@@ -1391,7 +1388,7 @@ async fn handle_socket(
     if let Ok(payload) = serde_json::to_string(&left_notification) {
         for peer in remaining_peers {
             if peer.try_send(payload.clone()).is_err() {
-                eprintln!("Dropping peer-left update for slow client in room {room_id}");
+                log_ws_slow_client("unknown", &room_id, "peer-left");
             }
         }
     }

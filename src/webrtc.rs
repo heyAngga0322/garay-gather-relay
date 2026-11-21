@@ -23,6 +23,7 @@ use webrtc::{
     rtp_transceiver::RtpSender,
 };
 
+use crate::error_logging::*;
 use crate::metrics::MetricsRecorder;
 use crate::signaling::{CandidateMessage, SignalMessage};
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
@@ -124,7 +125,8 @@ impl PeerConnectionEventHandler for PeerConnectionHandler {
         let source_key = self.peer_key.clone();
         tokio::spawn(async move {
             if let Err(error) = agent.relay_track(source_key.clone(), track).await {
-                eprintln!("RTP relay error: {error}");
+                let (room, peer_id) = source_key.split_once(':').unwrap_or(("", ""));
+                log_webrtc_error(peer_id, room, &error, "relay_track");
                 agent
                     .notify_room_relay_error(&source_key, &error.to_string())
                     .await;
@@ -319,7 +321,13 @@ impl WebRtcAgent {
             let negotiation_lock = self.negotiation_lock(&destination_key).await;
             let _negotiation_guard = negotiation_lock.lock().await;
             if !self.ready_peers.lock().await.contains(&destination_key) {
-                eprintln!("relay destination not ready: {destination_key} for {publication_key}");
+                log_debug(
+                    "relay destination not ready",
+                    &[
+                        ("destination_key", &destination_key),
+                        ("publication_key", &publication_key),
+                    ],
+                );
                 continue;
             }
             self.add_relay_track(&publication_key, &source_key, &destination_key, &source)
@@ -388,7 +396,11 @@ impl WebRtcAgent {
                             let kind = if packet.header.payload_type == 111 { "audio" } else { "video" };
                             if let Err(error) = output.write_rtp(packet).await {
                                 MetricsRecorder::rtp_packet_dropped(&room_for_task, "write_error");
-                                eprintln!("  write_rtp ERROR for {}: {}", destination_key, error);
+                                let (source_peer, dest_peer) = (
+                                    source_key.split(':').nth(1).unwrap_or(""),
+                                    destination_key.split(':').nth(1).unwrap_or(""),
+                                );
+                                log_rtp_relay_error(source_peer, dest_peer, &room_for_task, &error);
                                 if failed_destinations.insert(destination_key.clone()) {
                                     agent
                                         .notify_peer_relay_error(
@@ -457,23 +469,31 @@ impl WebRtcAgent {
         }
 
         let kind = source.kind().await;
-        eprintln!(
-            "add_relay_track: kind={:?}, publication_key={}",
-            kind, publication_key
+        log_rtp_relay_debug(
+            "add_relay_track",
+            &[
+                ("kind", &format!("{:?}", kind)),
+                ("publication_key", &publication_key.to_string()),
+            ],
         );
         let mut codec = None;
         for ssrc in source.ssrcs().await {
             if let Some(value) = source.codec(ssrc).await {
-                eprintln!(
-                    "  source codec for ssrc={}: mime_type={}, clock_rate={}, channels={}",
-                    ssrc, value.mime_type, value.clock_rate, value.channels
+                log_rtp_relay_debug(
+                    "source codec",
+                    &[
+                        ("ssrc", &ssrc.to_string()),
+                        ("mime_type", &value.mime_type),
+                        ("clock_rate", &value.clock_rate.to_string()),
+                        ("channels", &value.channels.to_string()),
+                    ],
                 );
                 codec = Some(value);
                 break;
             }
         }
         let Some(codec) = codec else {
-            eprintln!("  no codec found for source track");
+            log_rtp_relay_debug("no codec found for source track", &[]);
             return Ok(false);
         };
         let destination = self.get(destination_key).await?;
@@ -724,7 +744,8 @@ impl WebRtcAgent {
             let _negotiation_guard = negotiation_lock.lock().await;
             if let Ok(pc) = self.get(&destination_key).await {
                 if let Err(error) = pc.remove_track(&relay.sender).await {
-                    eprintln!("failed to remove relay track: {error}");
+                    let dest_peer = destination_key.split(':').nth(1).unwrap_or("");
+                    log_webrtc_error(dest_peer, room, &error, "remove_relay_track");
                     continue;
                 }
                 let Some((destination_room, destination_peer)) = destination_key.split_once(':')
@@ -740,7 +761,12 @@ impl WebRtcAgent {
                     )
                     .await
                 {
-                    eprintln!("failed to renegotiate relay removal: {error}");
+                    log_webrtc_error(
+                        destination_peer,
+                        destination_room,
+                        &error,
+                        "renegotiate_relay_removal",
+                    );
                 }
             }
         }

@@ -84,6 +84,14 @@ impl MetricsRecorder {
     pub fn capacity_rejected(room_id: &str) {
         counter!("garay_capacity_rejections_total", "room_id" => room_id.to_owned()).increment(1);
     }
+
+    pub fn error_recorded(category: &str, context: &str) {
+        counter!("garay_errors_total", "category" => category.to_owned(), "context" => context.to_owned()).increment(1);
+    }
+
+    pub fn ws_slow_client() {
+        counter!("garay_ws_slow_client_total").increment(1);
+    }
 }
 
 pub struct TimedScope {
